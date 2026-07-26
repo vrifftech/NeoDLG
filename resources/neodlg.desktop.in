@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=NeoDLG
+Comment=BioWare DLG conversation editor
+Exec=NeoDLG %f
+Icon=neodlg
+Terminal=false
+Categories=Utility;Development;
+MimeType=application/octet-stream;
