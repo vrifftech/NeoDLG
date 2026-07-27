@@ -69,6 +69,7 @@ function(neo_force_static_msvc_runtime_for_directory_targets)
 endfunction()
 
 include(GNUInstallDirs)
+include(CTest)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
@@ -192,6 +193,11 @@ if(NEODLG_BUILD_WX_GUI)
             BUNDLE DESTINATION .
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         )
+
+        if(BUILD_TESTING AND WIN32)
+            add_test(NAME neodlg-gui-startup COMMAND NeoDLG --smoke-test)
+            set_tests_properties(neodlg-gui-startup PROPERTIES TIMEOUT 30)
+        endif()
 
         if(UNIX AND NOT APPLE)
             foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256)
