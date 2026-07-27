@@ -111,6 +111,7 @@ if(NEODLG_BUILD_CLI)
 endif()
 
 
+
 option(NEODLG_BUILD_WX_GUI "Build the wxWidgets desktop GUI when wxWidgets is available" ON)
 option(NEODLG_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while NEODLG_BUILD_WX_GUI is ON" OFF)
 

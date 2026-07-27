@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
     inputs:
       neoshared_ref:
-        description: neoshared branch, tag, or commit SHA (blank uses NEOSHARED_REF or main)
+        description: NeoShared branch, tag, or commit SHA (blank uses main)
         required: false
         type: string
 
@@ -22,7 +22,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || vars.NEOSHARED_REF || 'main' }}
+  NEOSHARED_REF: ${{ github.event.client_payload.neoshared_ref || inputs.neoshared_ref || 'main' }}
 
 jobs:
   linux:
@@ -40,7 +40,7 @@ jobs:
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
-          repository: vrifftech/neoshared
+          repository: vrifftech/NeoShared
           ref: ${{ env.NEOSHARED_REF }}
           path: neoshared
           persist-credentials: false
@@ -104,7 +104,7 @@ jobs:
       - name: Check out neoshared
         uses: actions/checkout@v7
         with:
-          repository: vrifftech/neoshared
+          repository: vrifftech/NeoShared
           ref: ${{ env.NEOSHARED_REF }}
           path: neoshared
           persist-credentials: false
@@ -119,7 +119,25 @@ jobs:
       - name: Install wxWidgets 3.3.3
         shell: pwsh
         run: |
-          & .\neoshared\scripts\install-wxwidgets.ps1 `
+          $sharedRoot = Join-Path $env:GITHUB_WORKSPACE 'neoshared'
+          $installer = Join-Path $sharedRoot 'scripts\install-wxwidgets.ps1'
+          $overlayMetadata = Join-Path $sharedRoot 'vcpkg-ports\wxwidgets\vcpkg.json'
+
+          Write-Host "Requested NeoShared ref: $env:NEOSHARED_REF"
+          git -C $sharedRoot rev-parse HEAD
+          if ($LASTEXITCODE -ne 0) {
+            throw "NeoShared was not checked out at $sharedRoot"
+          }
+
+          foreach ($requiredPath in @($installer, $overlayMetadata)) {
+            if (-not (Test-Path -LiteralPath $requiredPath)) {
+              Write-Host 'NeoShared checkout contents:'
+              Get-ChildItem -LiteralPath $sharedRoot -Force | Select-Object Name, FullName
+              throw "The selected NeoShared revision does not contain required build infrastructure: $requiredPath"
+            }
+          }
+
+          & $installer `
             -VcpkgRoot $env:VCPKG_INSTALLATION_ROOT `
             -Triplet x64-windows-static `
             -CleanAfterBuild
