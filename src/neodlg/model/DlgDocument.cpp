@@ -128,6 +128,9 @@ void setExistingFieldValue(GffField& field, const std::string& value) {
     case FIELD_TYPE_FLOAT:
         dynamic_cast<GffFloatField&>(field).value = parseFloatValue(value);
         return;
+    case FIELD_TYPE_POSITION:
+        dynamic_cast<GffPositionField&>(field).value = neogff::ParseGffVector3Text(value);
+        return;
     case FIELD_TYPE_DOUBLE:
         dynamic_cast<GffDoubleField&>(field).value = ParseDoubleDecimal(value.empty() ? "0" : value);
         return;
@@ -167,6 +170,8 @@ std::unique_ptr<GffField> makeField(const std::string& label,
         return std::make_unique<GffIntField>(label, ParseInt32Decimal(value.empty() ? "0" : value));
     case FIELD_TYPE_FLOAT:
         return std::make_unique<GffFloatField>(label, parseFloatValue(value));
+    case FIELD_TYPE_POSITION:
+        return neogff::createField(label, neogff::fieldTypeName(fieldType), value);
     case FIELD_TYPE_CEXOSTRING:
         return std::make_unique<GffExoStringField>(label, value);
     case FIELD_TYPE_RESREF:
@@ -285,6 +290,7 @@ void DlgDocument::create(DlgFlavor selectedFlavor) {
     if (!rootStruct) throw std::runtime_error("Unable to create the DLG root structure.");
 
     if (selectedFlavor == DlgFlavor::JadeEmpire) {
+        rootStruct->AddField(std::make_unique<GffResRefField>("EndConversation", ""));
         rootStruct->AddField(std::make_unique<GffList>("TagList"));
         rootStruct->AddField(std::make_unique<GffList>("EntryList"));
         rootStruct->AddField(std::make_unique<GffList>("ReplyList"));
@@ -515,13 +521,16 @@ std::string DlgDocument::speaker(DlgNodeRef ref) const {
     const GffStruct* structure = node(ref);
     if (!structure) return {};
     if (dialect() == DlgDialect::JadeEmpire) {
+        if (ref.kind == DlgNodeKind::Reply) return {};
         const std::int32_t index = signedValue(structure->GetFieldByLabel("SpeakerIndex"), -1);
         const GffStruct* rootStruct = root();
         const GffList* tags = rootStruct ? findList(*rootStruct, "TagList") : nullptr;
         if (tags && index >= 0 && static_cast<std::size_t>(index) < tags->count()) {
             return stringValue(tags->GetStruct(static_cast<std::size_t>(index))->GetFieldByLabel("Tag"));
         }
-        return index >= 0 ? "Speaker " + std::to_string(index) : std::string{};
+        if (index == -1) return "Conversation owner";
+        if (index == -2) return "Default participant";
+        return "Speaker index " + std::to_string(index);
     }
     std::string value = stringValue(structure->GetFieldByLabel("Speaker"));
     if (value.empty() && ref.kind == DlgNodeKind::Reply) value = "Player";
@@ -646,14 +655,24 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultNode(DlgNodeKind kind) const 
     if (dialect() == DlgDialect::JadeEmpire || flavor() == DlgFlavor::JadeEmpire) {
         if (kind == DlgNodeKind::Entry) {
             result->AddField(std::make_unique<GffList>("RepliesList"));
-            result->AddField(std::make_unique<GffIntField>("SpeakerIndex", 0));
+            result->AddField(std::make_unique<GffIntField>("SpeakerIndex", -1));
+            result->AddField(std::make_unique<GffIntField>("ListenerIndex", -2));
             result->AddField(std::make_unique<GffJadeStringRefField>("Text", 4, 0xFFFFFFFFu));
-            result->AddField(std::make_unique<GffList>("AnimationList"));
+            result->AddField(std::make_unique<GffResRefField>("ScriptEntry", ""));
+            result->AddField(std::make_unique<GffResRefField>("ScriptCamEntry", "camscrentdef"));
+            result->AddField(std::make_unique<GffExoStringField>("CameraEntry", ""));
             result->AddField(std::make_unique<GffResRefField>("Script", ""));
+            result->AddField(std::make_unique<GffResRefField>("ScriptCamReplies", "camscrrepdef"));
+            result->AddField(std::make_unique<GffExoStringField>("CameraReplies", ""));
             result->AddField(std::make_unique<GffExoStringField>("VoiceOver", ""));
+            result->AddField(std::make_unique<GffByteField>("Skippable", 1));
+            result->AddField(std::make_unique<GffList>("AnimationList"));
         } else {
             result->AddField(std::make_unique<GffList>("EntriesList"));
             result->AddField(std::make_unique<GffJadeStringRefField>("Text", 4, 0xFFFFFFFFu));
+            result->AddField(std::make_unique<GffResRefField>("Script", ""));
+            result->AddField(std::make_unique<GffWordField>("Animation", 0xFFFFu));
+            result->AddField(std::make_unique<GffWordField>("Emotion", 0));
         }
         return result;
     }
@@ -700,23 +719,56 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultNode(DlgNodeKind kind) const 
 }
 
 void DlgDocument::clearClonedNode(GffStruct& structure, DlgNodeKind kind) const {
-    for (const char* label : {"Speaker", "Listener", "VO_ResRef", "Script", "Script2", "Sound", "Comment", "Quest",
-                              "ActionParamStrA", "ActionParamStrB", "VoiceOver", "ScriptCamEntry", "ScriptCamReplies", "ScriptEntry"}) {
-        clearStringField(structure, label);
-    }
+    const bool jade = dialect() == DlgDialect::JadeEmpire || flavor() == DlgFlavor::JadeEmpire;
     clearList(structure, childListLabel(kind));
-    clearList(structure, "AnimList");
-    clearList(structure, "AnimationList");
 
     if (auto* loc = dynamic_cast<GffLocalizedStringField*>(structure.GetFieldByLabel("Text"))) {
         loc->strref = 0xFFFFFFFFu;
         loc->substrings.clear();
         loc->stringcount = 0;
     }
-    if (auto* jade = dynamic_cast<GffJadeStringRefField*>(structure.GetFieldByLabel("Text"))) {
-        jade->stringType = 4;
-        jade->strref = 0xFFFFFFFFu;
+    if (auto* jadeText = dynamic_cast<GffJadeStringRefField*>(structure.GetFieldByLabel("Text"))) {
+        jadeText->stringType = 4;
+        jadeText->strref = 0xFFFFFFFFu;
     }
+
+    if (jade) {
+        const auto ensureEmptyList = [&](const char* label) {
+            GffList* list = findList(structure, label);
+            if (!list) {
+                auto created = std::make_unique<GffList>(label);
+                list = created.get();
+                structure.AddField(std::move(created));
+            }
+            list->allStructs().clear();
+        };
+
+        setField(structure, "Script", FIELD_TYPE_RESREF, "");
+        if (kind == DlgNodeKind::Entry) {
+            ensureEmptyList("RepliesList");
+            ensureEmptyList("AnimationList");
+            setField(structure, "SpeakerIndex", FIELD_TYPE_INT, "-1");
+            setField(structure, "ListenerIndex", FIELD_TYPE_INT, "-2");
+            setField(structure, "ScriptEntry", FIELD_TYPE_RESREF, "");
+            setField(structure, "ScriptCamEntry", FIELD_TYPE_RESREF, "camscrentdef");
+            setField(structure, "CameraEntry", FIELD_TYPE_CEXOSTRING, "");
+            setField(structure, "ScriptCamReplies", FIELD_TYPE_RESREF, "camscrrepdef");
+            setField(structure, "CameraReplies", FIELD_TYPE_CEXOSTRING, "");
+            setField(structure, "VoiceOver", FIELD_TYPE_CEXOSTRING, "");
+            setField(structure, "Skippable", FIELD_TYPE_BYTE, "1");
+        } else {
+            ensureEmptyList("EntriesList");
+            setField(structure, "Animation", FIELD_TYPE_WORD, "65535");
+            setField(structure, "Emotion", FIELD_TYPE_WORD, "0");
+        }
+        return;
+    }
+
+    for (const char* label : {"Speaker", "Listener", "VO_ResRef", "Script", "Script2", "Sound", "Comment", "Quest",
+                              "ActionParamStrA", "ActionParamStrB"}) {
+        clearStringField(structure, label);
+    }
+    clearList(structure, "AnimList");
 
     for (int i = 1; i <= 5; ++i) {
         setIntegralIfPresent(structure, "ActionParam" + std::to_string(i), 0);
@@ -724,7 +776,7 @@ void DlgDocument::clearClonedNode(GffStruct& structure, DlgNodeKind kind) const 
     }
     for (const char* label : {"NodeUnskippable", "PostProcNode", "AlienRaceNode", "Emotion", "RecordVO", "RecordNoVOOverri",
                               "RecordNoOverri", "FacialAnim", "CameraID", "CameraAngle", "FadeType", "WaitFlags", "SoundExists",
-                              "VOTextChanged", "Changed", "SpeakerIndex"}) {
+                              "VOTextChanged", "Changed"}) {
         setIntegralIfPresent(structure, label, 0);
     }
     setIntegralIfPresent(structure, "CamVidEffect", -1);
@@ -940,14 +992,30 @@ std::vector<DlgAnimation> DlgDocument::animations(DlgNodeRef ref) const {
     std::vector<DlgAnimation> result;
     const GffStruct* structure = node(ref);
     if (!structure) return result;
-    const char* label = dialect() == DlgDialect::JadeEmpire ? "AnimationList" : "AnimList";
+
+    const bool jade = dialect() == DlgDialect::JadeEmpire;
+    if (jade && ref.kind == DlgNodeKind::Reply) {
+        const std::int32_t animationValue = signedValue(structure->GetFieldByLabel("Animation"), 0xFFFF);
+        DlgAnimation animation;
+        animation.animation = animationValue;
+        animation.emotion = signedValue(structure->GetFieldByLabel("Emotion"), 0);
+        result.push_back(std::move(animation));
+        return result;
+    }
+
+    const char* label = jade ? "AnimationList" : "AnimList";
     const GffList* list = findList(*structure, label);
     if (!list) return result;
     result.reserve(list->count());
     for (const auto& item : list->allStructs()) {
         if (!item) continue;
         DlgAnimation animation;
-        animation.participant = stringValue(item->GetFieldByLabel("Participant"));
+        if (jade) {
+            animation.participantIndex = signedValue(
+                item->GetFieldByLabel("Index"), std::numeric_limits<std::int32_t>::max());
+        } else {
+            animation.participant = stringValue(item->GetFieldByLabel("Participant"));
+        }
         animation.animation = signedValue(item->GetFieldByLabel("Animation"));
         animation.emotion = signedValue(item->GetFieldByLabel("Emotion"));
         result.push_back(std::move(animation));
@@ -959,6 +1027,30 @@ void DlgDocument::replaceAnimations(DlgNodeRef ref, const std::vector<DlgAnimati
     GffStruct* structure = node(ref);
     if (!structure) throw std::out_of_range("Dialogue node does not exist.");
     const bool jade = dialect() == DlgDialect::JadeEmpire;
+
+    const auto checkedWord = [](std::int32_t value, const char* field) -> std::uint16_t {
+        if (value < 0 || value > 0xFFFF) {
+            throw std::out_of_range(std::string(field) + " must be between 0 and 65535.");
+        }
+        return static_cast<std::uint16_t>(value);
+    };
+
+    if (jade && ref.kind == DlgNodeKind::Reply) {
+        if (values.size() > 1) {
+            throw std::invalid_argument("A Jade Empire Reply supports exactly one animation record.");
+        }
+        const std::uint16_t animationValue = values.empty()
+            ? static_cast<std::uint16_t>(0xFFFFu)
+            : checkedWord(values.front().animation, "Animation");
+        const std::uint16_t emotionValue = values.empty()
+            ? static_cast<std::uint16_t>(0)
+            : checkedWord(values.front().emotion, "Emotion");
+        setField(*structure, "Animation", FIELD_TYPE_WORD, std::to_string(animationValue));
+        setField(*structure, "Emotion", FIELD_TYPE_WORD, std::to_string(emotionValue));
+        markDirty();
+        return;
+    }
+
     const std::string label = jade ? "AnimationList" : "AnimList";
     GffList* list = findList(*structure, label);
     if (!list) {
@@ -971,12 +1063,13 @@ void DlgDocument::replaceAnimations(DlgNodeRef ref, const std::vector<DlgAnimati
         auto item = std::make_unique<GffStruct>();
         item->typeid_ = static_cast<std::uint32_t>(i);
         if (jade) {
-            item->AddField(std::make_unique<GffIntField>("Index", static_cast<std::int32_t>(i)));
-            item->AddField(std::make_unique<GffWordField>("Animation", static_cast<std::uint16_t>(values[i].animation)));
-            item->AddField(std::make_unique<GffWordField>("Emotion", static_cast<std::uint16_t>(values[i].emotion)));
+            item->AddField(std::make_unique<GffIntField>("Index", values[i].participantIndex));
+            item->AddField(std::make_unique<GffWordField>("Animation", checkedWord(values[i].animation, "Animation")));
+            item->AddField(std::make_unique<GffWordField>("Emotion", checkedWord(values[i].emotion, "Emotion")));
         } else {
             item->AddField(std::make_unique<GffExoStringField>("Participant", values[i].participant));
-            item->AddField(std::make_unique<GffWordField>("Animation", static_cast<std::uint16_t>(values[i].animation)));
+            item->AddField(std::make_unique<GffWordField>(
+                "Animation", static_cast<std::uint16_t>(values[i].animation)));
         }
         list->AddStruct(std::move(item));
     }
@@ -1034,6 +1127,12 @@ void DlgDocument::replaceSpeakerTags(const std::vector<std::string>& values) {
     if (!rootStruct) throw std::runtime_error("DLG root structure is unavailable.");
 
     const std::vector<std::string> previous = speakerTags();
+    if (values == previous) return;
+
+    std::vector<std::string> normalizedValues;
+    normalizedValues.reserve(values.size());
+    for (const std::string& value : values) normalizedValues.push_back(lowerAscii(value));
+
     GffList* list = findList(*rootStruct, "TagList");
     if (!list) {
         auto created = std::make_unique<GffList>("TagList");
@@ -1041,29 +1140,67 @@ void DlgDocument::replaceSpeakerTags(const std::vector<std::string>& values) {
         rootStruct->AddField(std::move(created));
     }
     list->allStructs().clear();
-    for (std::size_t i = 0; i < values.size(); ++i) {
+    for (std::size_t i = 0; i < normalizedValues.size(); ++i) {
         auto item = std::make_unique<GffStruct>();
         item->typeid_ = static_cast<std::uint32_t>(i);
-        item->AddField(std::make_unique<GffExoStringField>("Tag", values[i]));
+        item->AddField(std::make_unique<GffExoStringField>("Tag", normalizedValues[i]));
         list->AddStruct(std::move(item));
     }
 
-    // Jade nodes refer to TagList by position. Preserve those references by
-    // matching the previous tag text to its new position; deleted speakers
-    // become unassigned instead of silently pointing at a different tag.
+    std::vector<std::int32_t> oldToNew(previous.size(), -1);
+    std::vector<bool> newIndexUsed(normalizedValues.size(), false);
+
+    // First preserve identity across reorder operations. Match duplicates one
+    // at a time so each new TagList slot is used at most once.
+    for (std::size_t oldIndex = 0; oldIndex < previous.size(); ++oldIndex) {
+        const std::string wanted = lowerAscii(previous[oldIndex]);
+        for (std::size_t newIndex = 0; newIndex < normalizedValues.size(); ++newIndex) {
+            if (!newIndexUsed[newIndex] && normalizedValues[newIndex] == wanted) {
+                oldToNew[oldIndex] = static_cast<std::int32_t>(newIndex);
+                newIndexUsed[newIndex] = true;
+                break;
+            }
+        }
+    }
+
+    // An unmatched old and new value at the same position is a participant
+    // rename, not a deletion followed by an unrelated insertion. Keep every
+    // existing node and animation reference attached to that participant.
+    const std::size_t commonCount = std::min(previous.size(), normalizedValues.size());
+    for (std::size_t index = 0; index < commonCount; ++index) {
+        if (oldToNew[index] == -1 && !newIndexUsed[index]) {
+            oldToNew[index] = static_cast<std::int32_t>(index);
+            newIndexUsed[index] = true;
+        }
+    }
+
+    const auto remap = [&](std::int32_t oldIndex, std::int32_t missingValue) {
+        if (oldIndex < 0 || static_cast<std::size_t>(oldIndex) >= oldToNew.size()) return oldIndex;
+        const std::int32_t mapped = oldToNew[static_cast<std::size_t>(oldIndex)];
+        return mapped >= 0 ? mapped : missingValue;
+    };
+
+    // Jade participant references are positional TagList indexes. Remap every
+    // semantic use by tag identity so reordering the list cannot silently
+    // change speakers, listeners, or animation performers.
     GffList* entries = nodeList(DlgNodeKind::Entry);
     if (entries) {
         for (auto& entry : entries->allStructs()) {
             if (!entry) continue;
-            auto* indexField = dynamic_cast<GffIntField*>(entry->GetFieldByLabel("SpeakerIndex"));
-            if (!indexField) continue;
-            const std::int32_t oldIndex = indexField->value;
-            if (oldIndex < 0 || static_cast<std::size_t>(oldIndex) >= previous.size()) continue;
-            const std::string& oldTag = previous[static_cast<std::size_t>(oldIndex)];
-            const auto found = std::find(values.begin(), values.end(), oldTag);
-            indexField->value = found == values.end()
-                                    ? -1
-                                    : static_cast<std::int32_t>(std::distance(values.begin(), found));
+            if (auto* field = dynamic_cast<GffIntField*>(entry->GetFieldByLabel("SpeakerIndex"))) {
+                field->value = remap(field->value, -1);
+            }
+            if (auto* field = dynamic_cast<GffIntField*>(entry->GetFieldByLabel("ListenerIndex"))) {
+                field->value = remap(field->value, -2);
+            }
+            if (GffList* animations = findList(*entry, "AnimationList")) {
+                for (auto& animation : animations->allStructs()) {
+                    if (!animation) continue;
+                    if (auto* field = dynamic_cast<GffIntField*>(animation->GetFieldByLabel("Index"))) {
+                        field->value = remap(field->value, std::numeric_limits<std::int32_t>::max());
+                    }
+                }
+            }
         }
     }
     markDirty();
@@ -1119,7 +1256,7 @@ std::vector<DlgIssue> DlgDocument::validate() const {
     std::vector<DlgIssue> issues;
     if (!semanticallyEditable()) {
         issues.push_back({DlgIssueSeverity::Error,
-                          "This file is not a supported classic DLG V3 conversation graph. Use Raw GFF view for low-level access.",
+                          "This file is not a supported classic DLG V3 conversation graph. Use the GFF Tree for low-level access.",
                           std::nullopt,
                           std::nullopt});
         return issues;
@@ -1170,6 +1307,52 @@ std::vector<DlgIssue> DlgDocument::validate() const {
                                       "NodeID " + std::to_string(id) + " is used by more than one node.",
                                       ref,
                                       std::nullopt});
+                }
+            }
+        }
+    }
+
+    if (dialect() == DlgDialect::JadeEmpire) {
+        const std::size_t tagCount = speakerTags().size();
+        const auto validParticipantIndex = [&](std::int32_t value, bool allowUnassigned) {
+            if (value == -1 || value == -2) return true;
+            if (allowUnassigned && value == std::numeric_limits<std::int32_t>::max()) return true;
+            return value >= 0 && static_cast<std::size_t>(value) < tagCount;
+        };
+
+        for (std::size_t i = 0; i < nodeCount(DlgNodeKind::Entry); ++i) {
+            const DlgNodeRef ref{DlgNodeKind::Entry, i};
+            const GffStruct* entry = node(ref);
+            if (!entry) continue;
+            const std::int32_t speakerIndex = signedValue(entry->GetFieldByLabel("SpeakerIndex"), -1);
+            const std::int32_t listenerIndex = signedValue(entry->GetFieldByLabel("ListenerIndex"), -2);
+            if (!validParticipantIndex(speakerIndex, false)) {
+                issues.push_back({DlgIssueSeverity::Error,
+                                  "SpeakerIndex " + std::to_string(speakerIndex) +
+                                      " does not identify a Jade TagList participant or a supported special participant.",
+                                  ref,
+                                  std::nullopt});
+            }
+            if (!validParticipantIndex(listenerIndex, false)) {
+                issues.push_back({DlgIssueSeverity::Error,
+                                  "ListenerIndex " + std::to_string(listenerIndex) +
+                                      " does not identify a Jade TagList participant or a supported special participant.",
+                                  ref,
+                                  std::nullopt});
+            }
+            if (const GffList* list = findList(*entry, "AnimationList")) {
+                for (std::size_t animationIndex = 0; animationIndex < list->count(); ++animationIndex) {
+                    const GffStruct* animation = list->GetStruct(animationIndex);
+                    if (!animation) continue;
+                    const std::int32_t participantIndex = signedValue(
+                        animation->GetFieldByLabel("Index"), std::numeric_limits<std::int32_t>::max());
+                    if (!validParticipantIndex(participantIndex, true)) {
+                        issues.push_back({DlgIssueSeverity::Error,
+                                          "Animation " + std::to_string(animationIndex) + " uses TagList index " +
+                                              std::to_string(participantIndex) + ", which is out of range.",
+                                          ref,
+                                          std::nullopt});
+                    }
                 }
             }
         }

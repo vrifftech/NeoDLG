@@ -8,9 +8,9 @@ The semantic editor supports:
 
 - Star Wars: Knights of the Old Republic dialogue graphs.
 - Star Wars: Knights of the Old Republic II dialogue graphs, including second scripts, conditional parameters, node IDs, camera fields, VO flags, emotions, and post-processing fields.
-- Jade Empire dialogue graphs, including `TagList` speakers, Jade string references, voice-over IDs, Jade scripts, animations, emotions, and reversed conditions.
+- Jade Empire dialogue graphs, including positional `TagList` participants, Jade string references, voice-over IDs, entry/reply camera scripts and tags, entry animation performers, reply animation/emotion pairs, skippable entries, designer numbers, and reversed conditions.
 - Optional TLK lookup for resolved dialogue text.
-- A raw GFF view for unusual fields and unsupported DLG schemas.
+- A structured GFF tree for unusual fields and unsupported DLG schemas.
 
 The design retains the useful workflow of the classic DLGEditor—entries, replies, starting links, conditionals, scripts, animations, stunts, search, and orphan handling—while replacing its implementation-oriented tree editing with explicit node and link operations.
 
@@ -38,21 +38,50 @@ Node operations are explicit:
 - Delete a node everywhere and repair affected indexes.
 - Reorder sibling choices.
 
-The inspector is divided by purpose rather than GFF layout:
+The inspector is divided by purpose rather than GFF layout. It changes with the detected DLG dialect and node kind.
+
+For KotOR and KotOR II:
 
 - **Line** — speaker, listener, StrRef, local text, resolved TLK text, voice-over, and designer comment.
-- **Scripts / Quest** — action scripts, camera scripts, quest fields, plot fields, strings, and integer parameters.
+- **Scripts / Quest** — action scripts, quest fields, plot fields, strings, and integer parameters.
 - **Presentation** — sound, delay, wait flags, cameras, animation-related fields, emotions, fades, post-processing, alien-race fields, and VO flags.
-- **Link / Conditions** — condition scripts, negation, logic, string/integer parameters, link comments, Jade designer numbers, and reversed conditions.
+- **Link / Conditions** — condition scripts, negation, logic, string/integer parameters, and link comments.
 - **Animations** — ordered animation records for the selected node.
 
-**Dialogue > Conversation Properties** edits root conversation settings, KotOR stunt models, or Jade speaker tags. When Jade tags are reordered or removed, NeoDLG remaps `SpeakerIndex` references by tag instead of silently changing speakers.
+For Jade Empire, only fields present in Jade's runtime DLG schema are shown:
+
+- **Entry Line** — `SpeakerIndex`, `ListenerIndex`, Jade string type/StrRef, resolved TLK text, `VoiceOver`, and `Skippable`.
+- **Entry Scripts** — `Script`, `ScriptEntry`, `ScriptCamEntry`, `CameraEntry`, `ScriptCamReplies`, and `CameraReplies`. Camera tags are stored lowercase, matching runtime comparison behavior.
+- **Reply Line** — Jade string type/StrRef and resolved TLK text.
+- **Reply Scripts** — the single Reply `Script` field.
+- **Link / Conditions** — `Active`, `ReverseCond`, and `DesignerNumber`; KotOR's second condition, logic, parameter banks, and `IsChild` are hidden.
+- **Entry Animations** — an ordered `AnimationList` whose `Index` selects a participant from the root `TagList`, independent of the animation row number.
+- **Reply Animation** — the singular `Animation`/`Emotion` pair stored directly on the Reply; `65535` is the unset animation value.
+
+KotOR-only presentation controls are hidden for Jade documents. The GFF Tree remains available for uncommon fields without presenting them as part of the Jade semantic schema.
+
+For KotOR and KotOR II conversations, the Presentation page uses constrained runtime-aware controls:
+
+- Camera angle is limited to Automatic, calculated presets 1–3, or Placed camera; an unknown value already present in a file remains preservable.
+- Camera ID remains an exposed integer and is enabled for Placed camera mode. NeoDLG does not yet resolve IDs from the current area GIT.
+- Camera and target height offsets accept finite signed decimal values.
+- Camera field of view is either Automatic (`-1`) or a positive custom value in **degrees**.
+- KotOR camera video effects are selected from rows `0`–`2` of `videoeffects.2da`, plus None (`-1`).
+- KotOR II camera video effects are selected from rows `0`–`15` of `videoeffects.2da`, plus None (`-1`). Unknown existing rows remain preservable for both games.
+- Fade type is Fade out (`0`) or Fade in (`1`); unknown existing nonzero values remain preservable.
+- Fade color uses a picker and normalized red/green/blue values from `0.0` through `1.0`.
+- Fade delay is labeled in **seconds** and must be zero or greater.
+- Fade length is labeled in **seconds** and must be greater than zero.
+
+The root conversation type is selected semantically as Normal, Computer, or Full conversation (disable the one-line bark shortcut). These KotOR-specific camera and fade controls are hidden for Jade Empire DLGs; unrepresented fields remain available in the GFF Tree.
+
+**Dialogue > Conversation Properties** edits root conversation settings, KotOR stunt models, or Jade `EndConversation` and the ordered participant `TagList`. The Jade participant page supports add, edit, delete, and move up/down. When tags are renamed, reordered, or removed, NeoDLG remaps `SpeakerIndex`, `ListenerIndex`, and Entry-animation participant indexes by tag identity instead of silently retargeting actors.
 
 **Dialogue > Validate Dialogue** reports invalid links, duplicate node IDs, missing starts, and unreachable nodes. Search covers visible text, TLK text, StrRefs, IDs, scripts, and other scalar node properties.
 
-### Raw GFF
+### GFF tree
 
-Raw GFF exposes the complete flattened document for fields not yet represented by the semantic inspector. The raw view is an advanced fallback, not the default editing model.
+The GFF tree exposes the complete document hierarchy for fields not yet represented by the semantic inspector. Double-click an editable value to change it. This structured tree is an advanced fallback, not the default dialogue-authoring model.
 
 ## Documents and interchange
 

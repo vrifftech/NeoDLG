@@ -4,6 +4,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
 #include <string>
 #include <vector>
@@ -67,7 +68,11 @@ struct DlgTextValue {
 };
 
 struct DlgAnimation {
+    // KotOR stores a participant tag string. Jade Empire stores a signed
+    // TagList index instead; keep both representations explicit so editing an
+    // animation never conflates its participant with its list ordinal.
     std::string participant;
+    std::int32_t participantIndex = std::numeric_limits<std::int32_t>::max();
     std::int32_t animation = 0;
     std::int32_t emotion = 0;
 };
