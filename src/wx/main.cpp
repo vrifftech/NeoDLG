@@ -2283,7 +2283,7 @@ private:
     }
 
     void changeFontScaleSteps(int steps) {
-        fontScale_ = neoview::adjustFontScale(fontScale_, steps);
+        fontScale_ = neoview::steppedFontScale(fontScale_, steps);
         settings_.setFontScale(fontScale_);
         applyFontScale();
     }
