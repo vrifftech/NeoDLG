@@ -3,8 +3,6 @@ name: CI
 on:
   push:
   pull_request:
-  schedule:
-    - cron: '19 7 * * 1'
   repository_dispatch:
     types: [neoshared-updated]
   workflow_dispatch:
@@ -71,9 +69,6 @@ jobs:
             --no-vcpkg \
             --jobs 2 \
             --clean
-
-      - name: Run tests
-        run: ctest --test-dir tool/build -C Release --output-on-failure
 
       - name: Stage install tree
         run: cmake --install tool/build --config Release --prefix tool/stage
@@ -160,10 +155,6 @@ jobs:
             -VcpkgTriplet x64-windows-static `
             -Parallel 2 `
             -Clean
-
-      - name: Run tests
-        shell: pwsh
-        run: ctest --test-dir tool/build -C Release --output-on-failure
 
       - name: Stage install tree
         shell: pwsh

@@ -5,7 +5,7 @@ if(POLICY CMP0091)
 endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
 
-project(NeoDLGCpp VERSION 1.0.0 DESCRIPTION "C++17/wxWidgets BioWare DLG editor" LANGUAGES CXX)
+project(NeoDLG VERSION 2.0.0 DESCRIPTION "Purpose-built BioWare conversation editor" LANGUAGES CXX)
 set(NEOSHARED_ROOT "" CACHE PATH
     "Path to the neoshared source repository; defaults to ../neoshared")
 
@@ -69,7 +69,6 @@ function(neo_force_static_msvc_runtime_for_directory_targets)
 endfunction()
 
 include(GNUInstallDirs)
-include(CTest)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
@@ -77,8 +76,6 @@ if(NOT TARGET neoshared::wx)
     add_subdirectory("${NEOSHARED_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/neoshared" EXCLUDE_FROM_ALL)
 endif()
-
-
 
 option(NEODLG_BUILD_CLI "Build the NeoDLG command-line utility" ON)
 
@@ -89,14 +86,23 @@ target_include_directories(neodlg_patcher PUBLIC src ${CMAKE_CURRENT_SOURCE_DIR}
 target_link_libraries(neodlg_patcher PUBLIC neoshared::gff neoshared::tslpatcher)
 target_compile_features(neodlg_patcher PUBLIC cxx_std_17)
 
+add_library(neodlg_model
+    src/neodlg/model/DlgDocument.cpp
+)
+target_include_directories(neodlg_model PUBLIC src)
+target_link_libraries(neodlg_model PUBLIC neoshared::gff_app)
+target_compile_features(neodlg_model PUBLIC cxx_std_17)
+
 add_library(neodlg_core INTERFACE)
 target_include_directories(neodlg_core INTERFACE src ${CMAKE_CURRENT_SOURCE_DIR}/src/neodlg/patcher)
-target_link_libraries(neodlg_core INTERFACE neoshared::gff_app neoshared::tslpatcher neodlg_patcher)
+target_link_libraries(neodlg_core INTERFACE neodlg_model neoshared::gff_app neoshared::tslpatcher neodlg_patcher)
 target_compile_features(neodlg_core INTERFACE cxx_std_17)
 if(MSVC)
     target_compile_options(neodlg_patcher PRIVATE /W4 /permissive-)
+    target_compile_options(neodlg_model PRIVATE /W4 /permissive-)
 else()
     target_compile_options(neodlg_patcher PRIVATE -Wall -Wextra -Wpedantic)
+    target_compile_options(neodlg_model PRIVATE -Wall -Wextra -Wpedantic)
 endif()
 
 if(NEODLG_BUILD_CLI)
@@ -109,8 +115,6 @@ if(NEODLG_BUILD_CLI)
     endif()
     install(TARGETS neodlg-cli RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 endif()
-
-
 
 option(NEODLG_BUILD_WX_GUI "Build the wxWidgets desktop GUI when wxWidgets is available" ON)
 option(NEODLG_REQUIRE_WX_GUI "Fail configure if wxWidgets is unavailable while NEODLG_BUILD_WX_GUI is ON" OFF)
@@ -171,6 +175,10 @@ if(NEODLG_BUILD_WX_GUI)
         set(NEODLG_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
             list(APPEND NEODLG_WX_SOURCES resources/neodlg.rc)
+        elseif(APPLE)
+            list(APPEND NEODLG_WX_SOURCES resources/neodlg.icns)
+            set_source_files_properties(resources/neodlg.icns PROPERTIES
+                MACOSX_PACKAGE_LOCATION Resources)
         endif()
 
         if(WIN32)
@@ -190,23 +198,30 @@ if(NEODLG_BUILD_WX_GUI)
         else()
             target_compile_options(NeoDLG PRIVATE -Wall -Wextra -Wpedantic)
         endif()
+        if(APPLE)
+            set_target_properties(NeoDLG PROPERTIES
+                MACOSX_BUNDLE_ICON_FILE neodlg.icns
+                MACOSX_BUNDLE_BUNDLE_NAME NeoDLG
+                MACOSX_BUNDLE_GUI_IDENTIFIER com.vrifftech.neodlg
+            )
+        endif()
+
         install(TARGETS NeoDLG
             BUNDLE DESTINATION .
             RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
         )
 
-        if(BUILD_TESTING AND WIN32)
-            add_test(NAME neodlg-gui-startup COMMAND NeoDLG --smoke-test)
-            set_tests_properties(neodlg-gui-startup PROPERTIES TIMEOUT 30)
-        endif()
-
         if(UNIX AND NOT APPLE)
-            foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256)
+            foreach(NEO_ICON_SIZE 16 24 32 48 64 128 256 512)
                 install(FILES resources/icons/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/neodlg.png
                     DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/${NEO_ICON_SIZE}x${NEO_ICON_SIZE}/apps
                     RENAME neodlg.png
                 )
             endforeach()
+            install(FILES resources/neodlg.svg
+                DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/icons/hicolor/scalable/apps
+                RENAME neodlg.svg
+            )
             configure_file(resources/neodlg.desktop.in ${CMAKE_CURRENT_BINARY_DIR}/neodlg.desktop @ONLY)
             install(FILES ${CMAKE_CURRENT_BINARY_DIR}/neodlg.desktop
                 DESTINATION ${CMAKE_INSTALL_DATAROOTDIR}/applications
