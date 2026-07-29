@@ -29,8 +29,8 @@ void usage(std::ostream& out) {
         << "  neodlg-cli search <dlg> <term> [--tlk dialog.tlk]\n"
         << "  neodlg-cli export <dlg> <xml|json> <output>\n"
         << "  neodlg-cli import <input-dlg> <output-dlg> <xml|json> <input-document>\n"
-        << "  neodlg-cli diff-tslpatcher <original-dlg> <modified-input> <output-dir|fragment.ini> [--modified-format xml|json|dlg|gff|kotor|native|auto] [--package|--fragment] [--filename name] [--allow-unsupported] [--generic-gff]\n"
-        << "  neodlg-cli diff-tslpatcher-import <original-dlg> <modified-input> <xml|json|dlg|gff|kotor|native|auto> <output-dir|fragment.ini> [--package|--fragment] [--filename name] [--allow-unsupported] [--generic-gff]\n"
+        << "  neodlg-cli diff-tslpatcher <original-dlg> <modified-input> <output-dir|fragment.ini> [--modified-format xml|json|dlg|gff|kotor|native|auto] [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
+        << "  neodlg-cli diff-tslpatcher-import <original-dlg> <modified-input> <xml|json|dlg|gff|kotor|native|auto> <output-dir|fragment.ini> [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
         << "  neodlg-cli roundtrip <input-dlg> <output-dlg>\n"
         << "  neodlg-cli new <output-dlg> [file-type]\n"
         << "  neodlg-cli set-value <input-dlg> <output-dlg> <path> <value>\n"
@@ -54,9 +54,25 @@ struct PatchOutputOptions {
     bool package = true;
     bool allowUnsupported = false;
     bool genericGff = false;
+    neodlg::patcher::DlgPatchMode patchMode = neodlg::patcher::DlgPatchMode::DynamicMerge;
     std::string patchFilename;
     std::string modifiedFormat = "auto";
+    std::string destination = "override";
 };
+
+neodlg::patcher::DlgPatchMode parseDlgPatchMode(std::string value) {
+    std::transform(value.begin(), value.end(), value.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    if (value == "dynamic" || value == "merge" || value == "dynamic-merge") {
+        return neodlg::patcher::DlgPatchMode::DynamicMerge;
+    }
+    if (value == "replace" || value == "replacement" || value == "complete") {
+        return neodlg::patcher::DlgPatchMode::CompleteReplacement;
+    }
+    throw std::runtime_error(
+        "Unknown patch mode '" + value + "'. Expected dynamic or replace.");
+}
 
 PatchOutputOptions parsePatchOutputOptions(int argc, char** argv, int begin, const std::filesystem::path& original) {
     PatchOutputOptions options;
@@ -71,6 +87,14 @@ PatchOutputOptions parsePatchOutputOptions(int argc, char** argv, int begin, con
             if (i + 1 >= argc) throw std::runtime_error("--filename requires a value.");
             options.patchFilename = argv[++i];
         } else if (arg == "--allow-unsupported") options.allowUnsupported = true;
+        else if (arg == "--patch-mode" || arg == "--mode") {
+            if (i + 1 >= argc) throw std::runtime_error(arg + " requires dynamic or replace.");
+            options.patchMode = parseDlgPatchMode(argv[++i]);
+        }
+        else if (arg == "--destination") {
+            if (i + 1 >= argc) throw std::runtime_error("--destination requires a value.");
+            options.destination = argv[++i];
+        }
         else if (arg == "--modified-format" || arg == "--input-format") {
             if (i + 1 >= argc) throw std::runtime_error(arg + " requires a value.");
             options.modifiedFormat = argv[++i];
@@ -99,13 +123,34 @@ bool isDlgModel(const GffModel& model) {
 }
 
 neotsl::PatchProject makePatcherProject(const GffModel& original,
-                                        const GffModel& modified,
+                                        GffModel& modified,
                                         const PatchOutputOptions& options,
                                         const std::filesystem::path& originalPath) {
     if (!options.genericGff && isDlgModel(original) && isDlgModel(modified)) {
-        return neodlg::patcher::diffDlgPatcher(original.gff(), modified.gff(), options.patchFilename, options.package, originalPath);
+        auto project = neodlg::patcher::diffDlgPatcher(
+            original.gff(),
+            modified.gff(),
+            options.patchFilename,
+            options.patchMode,
+            options.package,
+            originalPath,
+            options.destination);
+        if (options.patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
+            // A partial dynamic DLG branch is not a useful or correct package.
+            // Do not let --allow-unsupported bypass this mode's representability boundary.
+            neotsl::throwIfUnsupported(project);
+        }
+        return project;
     }
-    return neotsl::diffGffFlatTable(original.toTable(), modified.toTable(), options.patchFilename, options.package, originalPath);
+    if (options.patchMode == neodlg::patcher::DlgPatchMode::CompleteReplacement) {
+        throw std::runtime_error(
+            "--patch-mode replace is available only for DLG-aware patch generation.");
+    }
+    auto project = neotsl::diffGffFlatTable(original.toTable(), modified.toTable(), options.patchFilename,
+                                            options.package, originalPath);
+    auto& fileSection = project.section(options.patchFilename);
+    fileSection.entries.insert(fileSection.entries.begin(), {"!Destination", options.destination});
+    return project;
 }
 
 std::string normalizeParentPath(std::string path) {

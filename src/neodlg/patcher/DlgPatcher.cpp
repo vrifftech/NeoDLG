@@ -4,22 +4,26 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cstdint>
+#include <fstream>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
 #include <set>
-#include <sstream>
 #include <stdexcept>
+#include <string>
+#include <system_error>
 #include <utility>
+#include <vector>
 
 namespace neodlg::patcher {
+namespace {
 
 using neotsl::IniSection;
 using neotsl::PatchProject;
-using neotsl::sanitizeSectionName;
-
-namespace {
+using neotsl::StagedAsset;
 
 std::string lowerAscii(std::string text) {
     std::transform(text.begin(), text.end(), text.begin(), [](unsigned char ch) {
@@ -29,255 +33,9 @@ std::string lowerAscii(std::string text) {
 }
 
 std::string trim(std::string value) {
-    auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
+    const auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
     value.erase(value.begin(), std::find_if(value.begin(), value.end(), notSpace));
     value.erase(std::find_if(value.rbegin(), value.rend(), notSpace).base(), value.end());
-    return value;
-}
-
-[[maybe_unused]] bool iequals(const std::string& a, const std::string& b) {
-    return lowerAscii(a) == lowerAscii(b);
-}
-
-std::string cellOrEmpty(const std::vector<std::string>& row, std::size_t col) {
-    return col < row.size() ? row[col] : std::string();
-}
-
-std::size_t optionalColumn(const neotabular::Table& table, const std::string& name) {
-    const std::string want = lowerAscii(name);
-    for (std::size_t i = 0; i < table.columns.size(); ++i) {
-        if (lowerAscii(table.columns[i]) == want) return i;
-    }
-    return table.columns.size();
-}
-
-std::size_t requiredColumn(const neotabular::Table& table, const std::string& name) {
-    const std::size_t idx = optionalColumn(table, name);
-    if (idx == table.columns.size()) throw std::runtime_error("Required table column is missing: " + name);
-    return idx;
-}
-
-[[maybe_unused]] std::string baseNameNoExt(const std::string& patchFilename) {
-    std::filesystem::path p(patchFilename);
-    std::string stem = lowerAscii(p.stem().string());
-    if (stem.empty()) stem = "file";
-    return sanitizeSectionName(stem);
-}
-
-std::string uniqueSectionName(const PatchProject& project, const std::string& base) {
-    std::string clean = sanitizeSectionName(base);
-    if (clean.empty()) clean = "section";
-    for (std::size_t i = 0;; ++i) {
-        std::string candidate = clean + "_" + std::to_string(i);
-        if (!project.findSection(candidate)) return candidate;
-    }
-}
-
-std::string nextKey(const IniSection& section, const std::string& prefix) {
-    std::size_t next = 0;
-    const std::string want = lowerAscii(prefix);
-    for (const auto& kv : section.entries) {
-        const std::string key = lowerAscii(kv.key);
-        if (key.rfind(want, 0) != 0) continue;
-        const std::string suffix = key.substr(want.size());
-        if (suffix.empty()) continue;
-        bool ok = true;
-        std::size_t value = 0;
-        for (char ch : suffix) {
-            if (!std::isdigit(static_cast<unsigned char>(ch))) { ok = false; break; }
-            value = value * 10 + static_cast<std::size_t>(ch - '0');
-        }
-        if (ok && value >= next) next = value + 1;
-    }
-    return prefix + std::to_string(next);
-}
-
-void addAssetIfRequested(PatchProject& project, bool copyBaselineAsset, const std::filesystem::path& baselineAsset, const std::string& patchFilename) {
-    if (copyBaselineAsset && !baselineAsset.empty()) {
-        project.assets.push_back({baselineAsset, patchFilename});
-    }
-}
-
-void addNumberedEntry(PatchProject& project, const std::string& sectionName, const std::string& prefix, const std::string& value) {
-    auto& section = project.section(sectionName);
-    section.entries.push_back({nextKey(section, prefix), value});
-}
-
-void addPlainEntry(PatchProject& project, const std::string& sectionName, const std::string& key, const std::string& value) {
-    project.section(sectionName).entries.push_back({key, value});
-}
-
-std::string gffPatchType(std::string type) {
-    type = trim(type);
-    const std::string key = lowerAscii(type);
-    if (key == "cexostring") return "ExoString";
-    if (key == "cresref") return "ResRef";
-    if (key == "cexolocstring") return "ExoLocString";
-    if (key == "cexolocstring strref") return "ExoLocString";
-    if (key == "cexolocstring text") return "ExoLocString";
-    return type;
-}
-
-[[maybe_unused]] bool gffTypeIsEditableText(const std::string& type) {
-    const std::string key = lowerAscii(type);
-    return key != "struct" && key != "list" && key != "void" && key != "cexolocstring";
-}
-
-[[maybe_unused]] bool truthy(std::string text) {
-    text = lowerAscii(trim(std::move(text)));
-    return text == "1" || text == "yes" || text == "true" || text == "editable";
-}
-
-[[maybe_unused]] std::string parentPathOf(const std::string& path) {
-    const std::size_t pos = path.find_last_of('\\');
-    if (pos == std::string::npos) return {};
-    return path.substr(0, pos);
-}
-
-[[maybe_unused]] std::string leafOf(const std::string& path) {
-    const std::size_t pos = path.find_last_of('\\');
-    if (pos == std::string::npos) return path;
-    return path.substr(pos + 1);
-}
-
-[[maybe_unused]] std::string extractTypeId(const std::string& value) {
-    const std::string key = "typeid=";
-    const std::size_t pos = lowerAscii(value).find(key);
-    if (pos == std::string::npos) return "0";
-    std::size_t start = pos + key.size();
-    std::size_t end = start;
-    while (end < value.size() && std::isdigit(static_cast<unsigned char>(value[end]))) ++end;
-    return end > start ? value.substr(start, end - start) : std::string("0");
-}
-
-[[maybe_unused]] std::string extractLocStrRef(const std::string& value) {
-    const std::string key = "strref=";
-    const std::string lower = lowerAscii(value);
-    const std::size_t pos = lower.find(key);
-    if (pos == std::string::npos) return "-1";
-    std::size_t start = pos + key.size();
-    std::size_t end = start;
-    if (end < value.size() && value[end] == '-') ++end;
-    while (end < value.size() && std::isdigit(static_cast<unsigned char>(value[end]))) ++end;
-    return end > start ? value.substr(start, end - start) : std::string("-1");
-}
-
-[[maybe_unused]] std::string locLangKeyFromPath(const std::string& path) {
-    const std::size_t marker = path.rfind("(lang");
-    if (marker == std::string::npos || path.back() != ')') return {};
-    return "lang" + path.substr(marker + 5, path.size() - marker - 6);
-}
-
-
-struct GffRow {
-    std::string path;
-    std::string label;
-    std::string type;
-    std::string editable;
-    std::string value;
-    std::size_t order = 0;
-};
-
-[[maybe_unused]] std::map<std::string, GffRow> gffRowsByPath(const neotabular::Table& table) {
-    const std::size_t pathCol = requiredColumn(table, "Path");
-    const std::size_t labelCol = optionalColumn(table, "Label");
-    const std::size_t typeCol = optionalColumn(table, "Type");
-    const std::size_t editableCol = optionalColumn(table, "Editable");
-    const std::size_t valueCol = requiredColumn(table, "Value");
-    std::map<std::string, GffRow> out;
-    for (std::size_t i = 0; i < table.rows.size(); ++i) {
-        const auto& row = table.rows[i];
-        const std::string path = cellOrEmpty(row, pathCol);
-        if (path.empty()) continue;
-        out[path] = GffRow{path, cellOrEmpty(row, labelCol), cellOrEmpty(row, typeCol), cellOrEmpty(row, editableCol), cellOrEmpty(row, valueCol), i};
-    }
-    return out;
-}
-
-[[maybe_unused]] bool isLocStringChildType(const std::string& type) {
-    const std::string key = lowerAscii(type);
-    return key == "cexolocstring strref" || key == "cexolocstring text";
-}
-
-[[maybe_unused]] bool isLocStringChildPath(const std::string& path) {
-    return path.size() > 8 && path.back() == ')' && path.find('(') != std::string::npos;
-}
-
-} // namespace
-
-
-namespace {
-
-struct DlgDeferredAssignment {
-    std::string pathToken;
-    std::string valueToken;
-};
-
-struct DlgEmitContext {
-    PatchProject& project;
-    std::string fileSection;
-    std::size_t originalEntryCount = 0;
-    std::size_t originalReplyCount = 0;
-    std::map<std::string, std::string> rootIndexTokens;
-    std::vector<DlgDeferredAssignment> deferredAssignments;
-    int nextToken = 1;
-};
-
-std::string dlgToken(DlgEmitContext& ctx) {
-    return "2DAMEMORY" + std::to_string(ctx.nextToken++);
-}
-
-std::string dlgRootKey(const std::string& rootList, std::size_t index) {
-    return rootList + ":" + std::to_string(index);
-}
-
-std::string strRefText(std::uint32_t value) {
-    return value == 0xFFFFFFFFu ? std::string("-1") : std::to_string(value);
-}
-
-bool isDlgType(const neodlg::GffFile& file) {
-    return lowerAscii(trim(file.filetype())) == "dlg";
-}
-
-const neodlg::GffField* dlgStructField(const neodlg::GffStruct& structure, const std::string& label) {
-    for (std::size_t i = 0; i < structure.count(); ++i) {
-        const neodlg::GffField* field = structure.GetField(i);
-        if (field && field->GetLabel() == label) return field;
-    }
-    return nullptr;
-}
-
-const neodlg::GffList* dlgListField(const neodlg::GffStruct& structure, const std::string& label) {
-    const auto* field = dlgStructField(structure, label);
-    if (!field || field->fieldtype != neodlg::FIELD_TYPE_LIST) return nullptr;
-    return dynamic_cast<const neodlg::GffList*>(field);
-}
-
-const neodlg::GffList* dlgRootList(const neodlg::GffFile& file, const std::string& label) {
-    const auto* root = file.root();
-    return root ? dlgListField(*root, label) : nullptr;
-}
-
-bool parseSizeTStrict(const std::string& text, std::size_t& out) {
-    if (text.empty()) return false;
-    std::size_t value = 0;
-    for (char ch : text) {
-        if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
-        const std::size_t digit = static_cast<std::size_t>(ch - '0');
-        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10u) return false;
-        value = value * 10u + digit;
-    }
-    out = value;
-    return true;
-}
-
-std::optional<std::size_t> dlgStructIndexValue(const neodlg::GffStruct& structure) {
-    const neodlg::GffField* indexField = dlgStructField(structure, "Index");
-    if (!indexField) return std::nullopt;
-    std::string text = trim(indexField->GetString());
-    if (!text.empty() && text.front() == '+') text.erase(text.begin());
-    std::size_t value = 0;
-    if (!parseSizeTStrict(text, value)) return std::nullopt;
     return value;
 }
 
@@ -287,576 +45,1071 @@ std::string appendPath(const std::string& parent, const std::string& child) {
     return parent + "\\" + child;
 }
 
-std::string patcherFieldType(const neodlg::GffField& field) {
-    return gffPatchType(neodlg::fieldTypeName(field.fieldtype));
+std::string normalizePatchDestination(std::string value) {
+    value = trim(std::move(value));
+    if (value.empty() || lowerAscii(value) == "override") return "override";
+
+    std::replace(value.begin(), value.end(), '/', '\\');
+    while (value.rfind(".\\", 0) == 0) value.erase(0, 2);
+    if (value.empty()) return "override";
+    if (value.front() == '\\' || (value.size() >= 2 && value[1] == ':')) {
+        throw std::runtime_error(
+            "The patch destination must be relative to the game directory: " + value);
+    }
+
+    std::size_t start = 0;
+    while (start <= value.size()) {
+        const std::size_t end = value.find('\\', start);
+        const std::string component = value.substr(
+            start,
+            end == std::string::npos ? std::string::npos : end - start);
+        if (component == "..") {
+            throw std::runtime_error(
+                "The patch destination cannot leave the game directory: " + value);
+        }
+        if (end == std::string::npos) break;
+        start = end + 1;
+    }
+    return value;
 }
 
-bool isScalarPatchable(const neodlg::GffField& field) {
-    return field.fieldtype != neodlg::FIELD_TYPE_STRUCT &&
-           field.fieldtype != neodlg::FIELD_TYPE_LIST &&
-           field.fieldtype != neodlg::FIELD_TYPE_VOID;
+std::string nextKey(const IniSection& section, const std::string& prefix) {
+    std::size_t next = 0;
+    const std::string wanted = lowerAscii(prefix);
+    for (const auto& entry : section.entries) {
+        const std::string key = lowerAscii(entry.key);
+        if (key.rfind(wanted, 0) != 0) continue;
+        const std::string suffix = key.substr(wanted.size());
+        if (suffix.empty()) continue;
+
+        std::size_t value = 0;
+        bool numeric = true;
+        for (const char ch : suffix) {
+            if (!std::isdigit(static_cast<unsigned char>(ch))) {
+                numeric = false;
+                break;
+            }
+            const std::size_t digit = static_cast<std::size_t>(ch - '0');
+            if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10u) {
+                numeric = false;
+                break;
+            }
+            value = value * 10u + digit;
+        }
+        if (numeric && value >= next) next = value + 1u;
+    }
+    return prefix + std::to_string(next);
 }
 
-void appendHex(std::ostringstream& out, const neodlg::ByteBuffer& data) {
-    static constexpr char hex[] = "0123456789ABCDEF";
-    for (std::uint8_t byte : data) {
-        out << hex[(byte >> 4u) & 0x0Fu] << hex[byte & 0x0Fu];
+std::string uniqueSectionName(const PatchProject& project, const std::string& base) {
+    std::string clean = neotsl::sanitizeSectionName(base);
+    if (clean.empty()) clean = "field";
+    for (std::size_t index = 0;; ++index) {
+        const std::string candidate = clean + "_" + std::to_string(index);
+        if (!project.findSection(candidate)) return candidate;
     }
 }
 
-void appendFieldSignature(std::ostringstream& out, const neodlg::GffField& field);
+bool isDlgType(const GffFile& file) {
+    return lowerAscii(trim(file.filetype())) == "dlg";
+}
 
-void appendStructSignature(std::ostringstream& out, const neodlg::GffStruct& structure) {
-    out << "S(" << structure.typeid_ << "){";
-    for (std::size_t i = 0; i < structure.count(); ++i) {
-        const neodlg::GffField* field = structure.GetField(i);
-        if (!field) continue;
-        appendFieldSignature(out, *field);
-        out << ';';
+const GffField* fieldByLabel(const GffStruct& structure, const std::string& label) {
+    for (std::size_t index = 0; index < structure.count(); ++index) {
+        const GffField* field = structure.GetField(index);
+        if (field && field->GetLabel() == label) return field;
     }
-    out << '}';
+    return nullptr;
 }
 
-void appendListSignature(std::ostringstream& out, const neodlg::GffList& list) {
-    out << "L[";
-    for (std::size_t i = 0; i < list.count(); ++i) {
-        const neodlg::GffStruct* structure = list.GetStruct(i);
-        if (!structure) continue;
-        appendStructSignature(out, *structure);
-        out << ';';
+const GffList* listByLabel(const GffStruct& structure, const std::string& label) {
+    const GffField* field = fieldByLabel(structure, label);
+    if (!field || field->fieldtype != FIELD_TYPE_LIST) return nullptr;
+    return dynamic_cast<const GffList*>(field);
+}
+
+const GffList* rootList(const GffFile& file, const std::string& label) {
+    const GffStruct* root = file.root();
+    return root ? listByLabel(*root, label) : nullptr;
+}
+
+bool isJadeDlg(const GffFile& file) {
+    const GffStruct* root = file.root();
+    if (!root) return false;
+    if (fieldByLabel(*root, "TagList") && !fieldByLabel(*root, "DelayEntry")) return true;
+
+    std::vector<const GffStruct*> pending{root};
+    while (!pending.empty()) {
+        const GffStruct* structure = pending.back();
+        pending.pop_back();
+        for (std::size_t index = 0; index < structure->count(); ++index) {
+            const GffField* field = structure->GetField(index);
+            if (!field) continue;
+            if (field->fieldtype == FIELD_TYPE_JADE_STRREF) return true;
+            if (field->fieldtype == FIELD_TYPE_STRUCT) {
+                pending.push_back(&dynamic_cast<const GffStruct&>(*field));
+            } else if (field->fieldtype == FIELD_TYPE_LIST) {
+                const auto& list = dynamic_cast<const GffList&>(*field);
+                for (std::size_t item = 0; item < list.count(); ++item) {
+                    if (const GffStruct* child = list.GetStruct(item)) pending.push_back(child);
+                }
+            }
+        }
     }
-    out << ']';
+    return false;
 }
 
-void appendLocStringSignature(std::ostringstream& out, const neodlg::GffLocalizedStringField& loc) {
-    out << "loc:" << strRefText(loc.strref) << ':';
-    std::vector<std::pair<std::int32_t, std::string>> strings;
-    for (const auto& sub : loc.substrings) strings.push_back({sub.stringid, sub.GetString()});
-    std::sort(strings.begin(), strings.end(), [](const auto& a, const auto& b) { return a.first < b.first; });
-    for (const auto& item : strings) out << item.first << '=' << item.second << '|';
+std::string strRefText(std::uint32_t value) {
+    return value == 0xFFFFFFFFu ? std::string("-1") : std::to_string(value);
 }
 
-void appendFieldSignature(std::ostringstream& out, const neodlg::GffField& field) {
-    out << field.GetLabel() << ':' << field.fieldtype << '=';
-    switch (field.fieldtype) {
-    case neodlg::FIELD_TYPE_STRUCT:
-        appendStructSignature(out, dynamic_cast<const neodlg::GffStruct&>(field));
-        break;
-    case neodlg::FIELD_TYPE_LIST:
-        appendListSignature(out, dynamic_cast<const neodlg::GffList&>(field));
-        break;
-    case neodlg::FIELD_TYPE_CEXOLOCSTRING:
-        appendLocStringSignature(out, dynamic_cast<const neodlg::GffLocalizedStringField&>(field));
-        break;
-    case neodlg::FIELD_TYPE_VOID:
-        appendHex(out, dynamic_cast<const neodlg::GffVoidField&>(field).data);
-        break;
+std::string encodeLocalizedText(const std::string& value) {
+    std::string result;
+    result.reserve(value.size());
+    for (std::size_t index = 0; index < value.size(); ++index) {
+        const char ch = value[index];
+        if (ch == '\r') {
+            if (index + 1u < value.size() && value[index + 1u] == '\n') ++index;
+            result += "<#LF#>";
+        } else if (ch == '\n') {
+            result += "<#LF#>";
+        } else {
+            result.push_back(ch);
+        }
+    }
+    return result;
+}
+
+bool containsLineBreak(const std::string& value) {
+    return value.find('\r') != std::string::npos || value.find('\n') != std::string::npos;
+}
+
+bool localizedStringsEqual(const GffLocalizedStringField& lhs,
+                           const GffLocalizedStringField& rhs) {
+    if (lhs.substrings.size() != rhs.substrings.size()) return false;
+    std::map<std::int32_t, std::string> left;
+    std::map<std::int32_t, std::string> right;
+    for (const auto& value : lhs.substrings) left[value.stringid] = value.GetString();
+    for (const auto& value : rhs.substrings) right[value.stringid] = value.GetString();
+    return left == right;
+}
+
+bool fieldDeepEqual(const GffField& lhs, const GffField& rhs);
+
+bool structDeepEqual(const GffStruct& lhs, const GffStruct& rhs) {
+    if (lhs.typeid_ != rhs.typeid_ || lhs.count() != rhs.count()) return false;
+    for (std::size_t index = 0; index < lhs.count(); ++index) {
+        const GffField* left = lhs.GetField(index);
+        const GffField* right = rhs.GetField(index);
+        if ((left == nullptr) != (right == nullptr)) return false;
+        if (left && right && !fieldDeepEqual(*left, *right)) return false;
+    }
+    return true;
+}
+
+bool listDeepEqual(const GffList& lhs, const GffList& rhs) {
+    if (lhs.count() != rhs.count()) return false;
+    for (std::size_t index = 0; index < lhs.count(); ++index) {
+        const GffStruct* left = lhs.GetStruct(index);
+        const GffStruct* right = rhs.GetStruct(index);
+        if ((left == nullptr) != (right == nullptr)) return false;
+        if (left && right && !structDeepEqual(*left, *right)) return false;
+    }
+    return true;
+}
+
+bool fieldDeepEqual(const GffField& lhs, const GffField& rhs) {
+    if (lhs.fieldtype != rhs.fieldtype || lhs.GetLabel() != rhs.GetLabel()) return false;
+    switch (lhs.fieldtype) {
+    case FIELD_TYPE_STRUCT:
+        return structDeepEqual(dynamic_cast<const GffStruct&>(lhs),
+                               dynamic_cast<const GffStruct&>(rhs));
+    case FIELD_TYPE_LIST:
+        return listDeepEqual(dynamic_cast<const GffList&>(lhs),
+                             dynamic_cast<const GffList&>(rhs));
+    case FIELD_TYPE_CEXOLOCSTRING: {
+        const auto& left = dynamic_cast<const GffLocalizedStringField&>(lhs);
+        const auto& right = dynamic_cast<const GffLocalizedStringField&>(rhs);
+        return left.strref == right.strref && localizedStringsEqual(left, right);
+    }
     default:
-        out << field.GetString();
-        break;
+        return lhs.GetString() == rhs.GetString();
     }
 }
 
-std::string dlgStructSignature(const neodlg::GffStruct& structure) {
-    std::ostringstream out;
-    appendStructSignature(out, structure);
-    return out.str();
+bool hasDuplicateLabels(const GffStruct& structure) {
+    std::set<std::string> labels;
+    for (std::size_t index = 0; index < structure.count(); ++index) {
+        const GffField* field = structure.GetField(index);
+        if (field && !labels.insert(field->GetLabel()).second) return true;
+    }
+    return false;
 }
 
-std::string linkTargetRootForList(const std::string& listLabel) {
+std::vector<std::uint8_t> serializeGff(GffFile& file) {
+    const bool wasDirty = file.dirty();
+    const auto stamp = std::chrono::high_resolution_clock::now().time_since_epoch().count();
+    std::filesystem::path temporary = std::filesystem::temp_directory_path() /
+        ("neodlg-patcher-" + std::to_string(stamp) + ".dlg");
+
+    for (unsigned attempt = 0; std::filesystem::exists(temporary) && attempt < 100u; ++attempt) {
+        temporary = std::filesystem::temp_directory_path() /
+            ("neodlg-patcher-" + std::to_string(stamp) + "-" +
+             std::to_string(attempt + 1u) + ".dlg");
+    }
+
+    try {
+        file.SaveFile(temporary);
+        file.dirty(wasDirty);
+
+        std::ifstream input(temporary, std::ios::binary);
+        if (!input) {
+            throw std::runtime_error(
+                "Unable to read the generated DLG package asset: " + temporary.string());
+        }
+        std::vector<std::uint8_t> data(
+            (std::istreambuf_iterator<char>(input)),
+            std::istreambuf_iterator<char>());
+        if (!input.eof() && input.fail()) {
+            throw std::runtime_error(
+                "Unable to finish reading the generated DLG package asset: " + temporary.string());
+        }
+
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        return data;
+    } catch (...) {
+        file.dirty(wasDirty);
+        std::error_code ignored;
+        std::filesystem::remove(temporary, ignored);
+        throw;
+    }
+}
+
+PatchProject makeWholeFileReplacement(GffFile& modified,
+                                      const std::string& patchFilename,
+                                      const std::string& destination) {
+    PatchProject project;
+    project.add("Settings", "FileExists", "1");
+    project.add("Settings", "InstallerMode", "1");
+
+    const std::string installSection = "NeoDLGFiles";
+    project.add("InstallList", installSection, normalizePatchDestination(destination));
+    project.add(installSection, "Replace0", patchFilename);
+    project.add(patchFilename, "!SourceFile", patchFilename);
+    project.add(patchFilename, "!SaveAs", patchFilename);
+
+    StagedAsset asset;
+    asset.targetName = patchFilename;
+    asset.data = serializeGff(modified);
+    project.assets.push_back(std::move(asset));
+    return project;
+}
+
+std::string patchFieldType(const GffField& field) {
+    switch (field.fieldtype) {
+    case FIELD_TYPE_BYTE: return "Byte";
+    case FIELD_TYPE_CHAR: return "Char";
+    case FIELD_TYPE_WORD: return "Word";
+    case FIELD_TYPE_SHORT: return "Short";
+    case FIELD_TYPE_DWORD: return "DWORD";
+    case FIELD_TYPE_DWORD64: return "DWORD64";
+    case FIELD_TYPE_INT: return "Int";
+    case FIELD_TYPE_INT64: return "Int64";
+    case FIELD_TYPE_FLOAT: return "Float";
+    case FIELD_TYPE_DOUBLE: return "Double";
+    case FIELD_TYPE_CEXOSTRING: return "ExoString";
+    case FIELD_TYPE_RESREF: return "ResRef";
+    case FIELD_TYPE_CEXOLOCSTRING: return "ExoLocString";
+    case FIELD_TYPE_STRUCT: return "Struct";
+    case FIELD_TYPE_LIST: return "List";
+    case FIELD_TYPE_ORIENTATION: return "Orientation";
+    case FIELD_TYPE_POSITION: return "Position";
+    default:
+        throw std::runtime_error(
+            "TSLPatcher cannot add GFF field type " + fieldTypeName(field.fieldtype) + ".");
+    }
+}
+
+bool isScalarPatchable(const GffField& field) {
+    return field.fieldtype != FIELD_TYPE_STRUCT &&
+           field.fieldtype != FIELD_TYPE_LIST &&
+           field.fieldtype != FIELD_TYPE_CEXOLOCSTRING &&
+           field.fieldtype != FIELD_TYPE_VOID &&
+           field.fieldtype != FIELD_TYPE_JADE_STRREF;
+}
+
+bool parseSizeTStrict(const std::string& text, std::size_t& out) {
+    if (text.empty()) return false;
+    std::size_t value = 0;
+    for (const char ch : text) {
+        if (!std::isdigit(static_cast<unsigned char>(ch))) return false;
+        const std::size_t digit = static_cast<std::size_t>(ch - '0');
+        if (value > (std::numeric_limits<std::size_t>::max() - digit) / 10u) return false;
+        value = value * 10u + digit;
+    }
+    out = value;
+    return true;
+}
+
+std::optional<std::size_t> structIndexValue(const GffStruct& structure) {
+    const GffField* indexField = fieldByLabel(structure, "Index");
+    if (!indexField) return std::nullopt;
+    std::string text = trim(indexField->GetString());
+    if (!text.empty() && text.front() == '+') text.erase(text.begin());
+    std::size_t value = 0;
+    if (!parseSizeTStrict(text, value)) return std::nullopt;
+    return value;
+}
+
+std::string targetRootForLinkList(const std::string& listLabel) {
     if (listLabel == "RepliesList") return "ReplyList";
     if (listLabel == "EntriesList" || listLabel == "StartingList") return "EntryList";
     return {};
 }
 
-bool isDlgLinkListLabel(const std::string& listLabel) {
-    return listLabel == "RepliesList" || listLabel == "EntriesList" || listLabel == "StartingList";
-}
-
-bool shouldUseListIndexTypeId(const std::string& listLabel) {
-    return listLabel == "EntryList" || listLabel == "ReplyList" ||
-           listLabel == "RepliesList" || listLabel == "EntriesList" ||
+bool isLinkList(const std::string& listLabel) {
+    return listLabel == "RepliesList" ||
+           listLabel == "EntriesList" ||
            listLabel == "StartingList";
 }
 
-std::optional<std::string> tokenForDlgRootTarget(const DlgEmitContext& ctx, const std::string& rootList, std::size_t index) {
-    const auto found = ctx.rootIndexTokens.find(dlgRootKey(rootList, index));
-    if (found == ctx.rootIndexTokens.end()) return std::nullopt;
+struct DeferredAssignment {
+    std::string pathToken;
+    std::string valueToken;
+};
+
+struct EmitContext {
+    PatchProject& project;
+    std::string fileSection;
+    std::size_t originalEntryCount = 0;
+    std::size_t originalReplyCount = 0;
+    std::map<std::string, std::string> rootIndexTokens;
+    std::vector<DeferredAssignment> deferredAssignments;
+    int nextToken = 1;
+    bool changed = false;
+};
+
+std::string allocateToken(EmitContext& context) {
+    return "2DAMEMORY" + std::to_string(context.nextToken++);
+}
+
+std::string rootTokenKey(const std::string& listName, std::size_t index) {
+    return listName + ":" + std::to_string(index);
+}
+
+std::optional<std::string> tokenForRootTarget(const EmitContext& context,
+                                              const std::string& rootList,
+                                              std::size_t index) {
+    const auto found = context.rootIndexTokens.find(rootTokenKey(rootList, index));
+    if (found == context.rootIndexTokens.end()) return std::nullopt;
     return found->second;
 }
 
-std::string addGffAddFieldSection(DlgEmitContext& ctx,
-                                  const std::string& parentSection,
-                                  const std::string& baseName,
-                                  const neodlg::GffField& field,
-                                  const std::optional<std::string>& path,
-                                  const std::string& label,
-                                  const std::optional<std::string>& typeId,
-                                  const std::optional<std::string>& value,
-                                  const std::optional<std::string>& listIndexToken,
-                                  const std::optional<std::string>& fieldPathToken) {
-    const std::string sectionName = uniqueSectionName(ctx.project, baseName);
-    addNumberedEntry(ctx.project, parentSection, "AddField", sectionName);
-    ctx.project.add(sectionName, "FieldType", patcherFieldType(field));
-    if (path) ctx.project.add(sectionName, "Path", *path);
-    ctx.project.add(sectionName, "Label", label);
-    if (typeId) ctx.project.add(sectionName, "TypeId", *typeId);
-    if (value) ctx.project.add(sectionName, "Value", *value);
-    if (listIndexToken) ctx.project.add(sectionName, *listIndexToken, "ListIndex");
-    if (fieldPathToken) ctx.project.add(sectionName, *fieldPathToken, "!FieldPath");
+void addNumberedEntry(PatchProject& project,
+                      const std::string& sectionName,
+                      const std::string& prefix,
+                      const std::string& value) {
+    IniSection& section = project.section(sectionName);
+    section.entries.push_back({nextKey(section, prefix), value});
+}
+
+void addPlainEntry(PatchProject& project,
+                   const std::string& sectionName,
+                   const std::string& key,
+                   const std::string& value) {
+    project.section(sectionName).entries.push_back({key, value});
+}
+
+std::string addFieldSection(EmitContext& context,
+                            const std::string& parentSection,
+                            const std::string& baseName,
+                            const GffField& field,
+                            const std::optional<std::string>& path,
+                            const std::string& label,
+                            const std::optional<std::string>& typeId,
+                            const std::optional<std::string>& value,
+                            const std::optional<std::string>& listIndexToken,
+                            const std::optional<std::string>& fieldPathToken) {
+    const std::string sectionName = uniqueSectionName(context.project, baseName);
+    addNumberedEntry(context.project, parentSection, "AddField", sectionName);
+    context.project.add(sectionName, "FieldType", patchFieldType(field));
+    if (path) context.project.add(sectionName, "Path", *path);
+    context.project.add(sectionName, "Label", label);
+    if (typeId) context.project.add(sectionName, "TypeId", *typeId);
+    if (value) context.project.add(sectionName, "Value", *value);
+    if (listIndexToken) context.project.add(sectionName, *listIndexToken, "ListIndex");
+    if (fieldPathToken) context.project.add(sectionName, *fieldPathToken, "!FieldPath");
+    context.changed = true;
     return sectionName;
 }
 
-std::string addLocStringAddFieldSection(DlgEmitContext& ctx,
-                                        const std::string& parentSection,
-                                        const std::string& baseName,
-                                        const neodlg::GffLocalizedStringField& loc,
-                                        const std::optional<std::string>& path,
-                                        const std::string& label) {
-    const std::string sectionName = uniqueSectionName(ctx.project, baseName);
-    addNumberedEntry(ctx.project, parentSection, "AddField", sectionName);
-    ctx.project.add(sectionName, "FieldType", "ExoLocString");
-    if (path) ctx.project.add(sectionName, "Path", *path);
-    ctx.project.add(sectionName, "Label", label);
-    ctx.project.add(sectionName, "StrRef", strRefText(loc.strref));
+std::string addLocStringSection(EmitContext& context,
+                                const std::string& parentSection,
+                                const std::string& baseName,
+                                const GffLocalizedStringField& loc,
+                                const std::optional<std::string>& path,
+                                const std::string& label) {
+    const std::string sectionName = uniqueSectionName(context.project, baseName);
+    addNumberedEntry(context.project, parentSection, "AddField", sectionName);
+    context.project.add(sectionName, "FieldType", "ExoLocString");
+    if (path) context.project.add(sectionName, "Path", *path);
+    context.project.add(sectionName, "Label", label);
+    context.project.add(sectionName, "StrRef", strRefText(loc.strref));
     for (const auto& sub : loc.substrings) {
-        ctx.project.add(sectionName, "lang" + std::to_string(sub.stringid), sub.GetString());
+        context.project.add(
+            sectionName,
+            "lang" + std::to_string(sub.stringid),
+            encodeLocalizedText(sub.GetString()));
     }
+    context.changed = true;
     return sectionName;
 }
 
-struct DlgEmitStructOptions {
+struct StructEmitOptions {
     std::string listLabel;
     std::optional<std::string> path;
     std::optional<std::string> listIndexToken;
     std::string targetRootList;
     std::string baseName;
+    bool listElement = false;
 };
 
-void emitDlgField(DlgEmitContext& ctx,
-                  const std::string& parentSection,
-                  const neodlg::GffField& field,
-                  const std::optional<std::string>& path,
-                  const std::string& baseName,
-                  const std::optional<std::string>& forcedValue = std::nullopt,
-                  const std::optional<std::string>& fieldPathToken = std::nullopt);
+void emitField(EmitContext& context,
+               const std::string& parentSection,
+               const GffField& field,
+               const std::optional<std::string>& path,
+               const std::string& baseName,
+               const std::optional<std::string>& forcedValue = std::nullopt,
+               const std::optional<std::string>& fieldPathToken = std::nullopt);
 
-void emitDlgStruct(DlgEmitContext& ctx,
-                   const std::string& parentSection,
-                   const neodlg::GffStruct& structure,
-                   DlgEmitStructOptions options) {
-    std::string typeId = std::to_string(structure.typeid_);
-    if (shouldUseListIndexTypeId(options.listLabel)) typeId = "ListIndex";
+void emitStruct(EmitContext& context,
+                const std::string& parentSection,
+                const GffStruct& structure,
+                StructEmitOptions options) {
+    std::optional<std::string> typeId;
+    if (options.listElement) typeId = "ListIndex";
+    else typeId = std::to_string(structure.typeid_);
 
-    std::optional<std::string> dynamicIndexValueToken;
+    std::optional<std::string> dynamicTargetToken;
     if (!options.targetRootList.empty()) {
-        const auto targetIndex = dlgStructIndexValue(structure);
-        if (targetIndex) {
-            dynamicIndexValueToken = tokenForDlgRootTarget(ctx, options.targetRootList, *targetIndex);
-            if (!dynamicIndexValueToken &&
-                ((options.targetRootList == "EntryList" && *targetIndex >= ctx.originalEntryCount) ||
-                 (options.targetRootList == "ReplyList" && *targetIndex >= ctx.originalReplyCount))) {
-                ctx.project.unsupported.push_back("DLG link in " + options.listLabel + " references new " + options.targetRootList +
-                                                  " index " + std::to_string(*targetIndex) + " but no dynamic token was allocated for it.");
+        const auto targetIndex = structIndexValue(structure);
+        if (!targetIndex) {
+            context.project.unsupported.push_back(
+                "A link added to " + options.listLabel + " has no numeric Index field.");
+        } else {
+            dynamicTargetToken = tokenForRootTarget(
+                context, options.targetRootList, *targetIndex);
+            if (!dynamicTargetToken &&
+                ((options.targetRootList == "EntryList" &&
+                  *targetIndex >= context.originalEntryCount) ||
+                 (options.targetRootList == "ReplyList" &&
+                  *targetIndex >= context.originalReplyCount))) {
+                context.project.unsupported.push_back(
+                    "A new link references an untracked new " + options.targetRootList +
+                    " node at local index " + std::to_string(*targetIndex) + ".");
             }
-        } else {
-            ctx.project.warnings.push_back("DLG link added to " + options.listLabel + " has no numeric Index field; it was emitted without dynamic relinking.");
         }
     }
 
-    const std::string sectionName = addGffAddFieldSection(ctx,
-                                                          parentSection,
-                                                          options.baseName,
-                                                          structure,
-                                                          options.path,
-                                                          structure.GetLabel(),
-                                                          typeId,
-                                                          std::nullopt,
-                                                          options.listIndexToken,
-                                                          std::nullopt);
+    const std::string sectionName = addFieldSection(
+        context,
+        parentSection,
+        options.baseName,
+        structure,
+        options.path,
+        structure.GetLabel(),
+        typeId,
+        std::nullopt,
+        options.listIndexToken,
+        std::nullopt);
 
-    for (std::size_t i = 0; i < structure.count(); ++i) {
-        const neodlg::GffField* child = structure.GetField(i);
+    for (std::size_t index = 0; index < structure.count(); ++index) {
+        const GffField* child = structure.GetField(index);
         if (!child) continue;
-        if (dynamicIndexValueToken && child->GetLabel() == "Index" && isScalarPatchable(*child)) {
-            const std::string pathToken = dlgToken(ctx);
-            emitDlgField(ctx, sectionName, *child, std::nullopt, options.baseName + "_index", std::string("0"), pathToken);
-            ctx.deferredAssignments.push_back({pathToken, *dynamicIndexValueToken});
+
+        if (dynamicTargetToken && child->GetLabel() == "Index" && isScalarPatchable(*child)) {
+            const std::string pathToken = allocateToken(context);
+            emitField(
+                context,
+                sectionName,
+                *child,
+                std::nullopt,
+                options.baseName + "_Index",
+                std::string("0"),
+                pathToken);
+            context.deferredAssignments.push_back({pathToken, *dynamicTargetToken});
         } else {
-            emitDlgField(ctx, sectionName, *child, std::nullopt, options.baseName + "_" + child->GetLabel());
+            emitField(
+                context,
+                sectionName,
+                *child,
+                std::nullopt,
+                options.baseName + "_" + child->GetLabel());
         }
     }
 }
 
-void emitDlgList(DlgEmitContext& ctx,
-                 const std::string& parentSection,
-                 const neodlg::GffList& list,
-                 const std::optional<std::string>& path,
-                 const std::string& baseName) {
+void emitList(EmitContext& context,
+              const std::string& parentSection,
+              const GffList& list,
+              const std::optional<std::string>& path,
+              const std::string& baseName) {
     if (list.gff4CompactPrimitiveList) {
-        ctx.project.unsupported.push_back("DLG patcher output cannot add compact primitive GFF4 list: " + list.GetLabel());
+        context.project.unsupported.push_back(
+            "TSLPatcher cannot add a compact GFF4 list: " + list.GetLabel());
         return;
     }
-    const std::string sectionName = addGffAddFieldSection(ctx,
-                                                          parentSection,
-                                                          baseName,
-                                                          list,
-                                                          path,
-                                                          list.GetLabel(),
-                                                          std::nullopt,
-                                                          std::nullopt,
-                                                          std::nullopt,
-                                                          std::nullopt);
-    const std::string targetRoot = linkTargetRootForList(list.GetLabel());
-    for (std::size_t i = 0; i < list.count(); ++i) {
-        const neodlg::GffStruct* structure = list.GetStruct(i);
-        if (!structure) continue;
-        emitDlgStruct(ctx, sectionName, *structure,
-                      DlgEmitStructOptions{list.GetLabel(), std::nullopt, std::nullopt, targetRoot,
-                                           baseName + "_" + list.GetLabel() + "_" + std::to_string(i)});
+
+    const std::string sectionName = addFieldSection(
+        context,
+        parentSection,
+        baseName,
+        list,
+        path,
+        list.GetLabel(),
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+        std::nullopt);
+
+    const std::string targetRoot = targetRootForLinkList(list.GetLabel());
+    for (std::size_t index = 0; index < list.count(); ++index) {
+        const GffStruct* structure = list.GetStruct(index);
+        if (!structure) {
+            context.project.unsupported.push_back(
+                "A newly added list contains an empty structure slot: " + list.GetLabel());
+            continue;
+        }
+        emitStruct(
+            context,
+            sectionName,
+            *structure,
+            StructEmitOptions{
+                list.GetLabel(),
+                std::nullopt,
+                std::nullopt,
+                targetRoot,
+                baseName + "_" + list.GetLabel() + "_" + std::to_string(index),
+                true});
     }
 }
 
-void emitDlgField(DlgEmitContext& ctx,
-                  const std::string& parentSection,
-                  const neodlg::GffField& field,
-                  const std::optional<std::string>& path,
-                  const std::string& baseName,
-                  const std::optional<std::string>& forcedValue,
-                  const std::optional<std::string>& fieldPathToken) {
-    switch (field.fieldtype) {
-    case neodlg::FIELD_TYPE_STRUCT:
-        emitDlgStruct(ctx, parentSection, dynamic_cast<const neodlg::GffStruct&>(field),
-                      DlgEmitStructOptions{std::string{}, path, std::nullopt, std::string{}, baseName});
-        break;
-    case neodlg::FIELD_TYPE_LIST:
-        emitDlgList(ctx, parentSection, dynamic_cast<const neodlg::GffList&>(field), path, baseName);
-        break;
-    case neodlg::FIELD_TYPE_CEXOLOCSTRING:
-        addLocStringAddFieldSection(ctx,
-                                    parentSection,
-                                    baseName,
-                                    dynamic_cast<const neodlg::GffLocalizedStringField&>(field),
-                                    path,
-                                    field.GetLabel());
-        break;
-    case neodlg::FIELD_TYPE_VOID:
-        ctx.project.unsupported.push_back("DLG patcher output cannot add VOID field: " + (path ? *path : field.GetLabel()));
-        break;
-    default:
-        addGffAddFieldSection(ctx,
-                              parentSection,
-                              baseName,
-                              field,
-                              path,
-                              field.GetLabel(),
-                              std::nullopt,
-                              forcedValue ? forcedValue : std::optional<std::string>(field.GetString()),
-                              std::nullopt,
-                              fieldPathToken);
-        break;
+void emitField(EmitContext& context,
+               const std::string& parentSection,
+               const GffField& field,
+               const std::optional<std::string>& path,
+               const std::string& baseName,
+               const std::optional<std::string>& forcedValue,
+               const std::optional<std::string>& fieldPathToken) {
+    try {
+        switch (field.fieldtype) {
+        case FIELD_TYPE_STRUCT:
+            emitStruct(
+                context,
+                parentSection,
+                dynamic_cast<const GffStruct&>(field),
+                StructEmitOptions{
+                    {}, path, std::nullopt, {}, baseName, false});
+            break;
+        case FIELD_TYPE_LIST:
+            emitList(
+                context,
+                parentSection,
+                dynamic_cast<const GffList&>(field),
+                path,
+                baseName);
+            break;
+        case FIELD_TYPE_CEXOLOCSTRING:
+            addLocStringSection(
+                context,
+                parentSection,
+                baseName,
+                dynamic_cast<const GffLocalizedStringField&>(field),
+                path,
+                field.GetLabel());
+            break;
+        case FIELD_TYPE_VOID:
+        case FIELD_TYPE_JADE_STRREF:
+            context.project.unsupported.push_back(
+                "TSLPatcher cannot add field " + appendPath(path.value_or(""), field.GetLabel()) +
+                " with type " + fieldTypeName(field.fieldtype) + ".");
+            break;
+        default: {
+            const std::string value = forcedValue.value_or(field.GetString());
+            if (containsLineBreak(value)) {
+                context.project.unsupported.push_back(
+                    "A non-localized GFF value contains a line break: " +
+                    appendPath(path.value_or(""), field.GetLabel()));
+                break;
+            }
+            addFieldSection(
+                context,
+                parentSection,
+                baseName,
+                field,
+                path,
+                field.GetLabel(),
+                std::nullopt,
+                value,
+                std::nullopt,
+                fieldPathToken);
+            break;
+        }
+        }
+    } catch (const std::exception& error) {
+        context.project.unsupported.push_back(error.what());
     }
 }
 
-void emitDirectScalarModification(DlgEmitContext& ctx, const std::string& path, const neodlg::GffField& modified) {
-    if (modified.fieldtype == neodlg::FIELD_TYPE_CEXOLOCSTRING ||
-        modified.fieldtype == neodlg::FIELD_TYPE_STRUCT ||
-        modified.fieldtype == neodlg::FIELD_TYPE_LIST) {
+void emitDirectScalarModification(EmitContext& context,
+                                  const std::string& path,
+                                  const GffField& modified) {
+    if (!isScalarPatchable(modified)) {
+        context.project.unsupported.push_back(
+            "TSLPatcher cannot modify field " + path + " with type " +
+            fieldTypeName(modified.fieldtype) + ".");
         return;
     }
-    if (modified.fieldtype == neodlg::FIELD_TYPE_VOID) {
-        ctx.project.unsupported.push_back("DLG modified VOID field is not emitted as a patcher value: " + path);
+    const std::string value = modified.GetString();
+    if (containsLineBreak(value)) {
+        context.project.unsupported.push_back(
+            "A non-localized GFF value contains a line break: " + path);
         return;
     }
-    addPlainEntry(ctx.project, ctx.fileSection, path, modified.GetString());
+    addPlainEntry(context.project, context.fileSection, path, value);
+    context.changed = true;
 }
 
-void emitDirectLocStringModifications(DlgEmitContext& ctx,
+void emitDirectLocStringModifications(EmitContext& context,
                                       const std::string& path,
-                                      const neodlg::GffLocalizedStringField& original,
-                                      const neodlg::GffLocalizedStringField& modified) {
+                                      const GffLocalizedStringField& original,
+                                      const GffLocalizedStringField& modified) {
     if (original.strref != modified.strref) {
-        addPlainEntry(ctx.project, ctx.fileSection, path + "(strref)", strRefText(modified.strref));
+        addPlainEntry(
+            context.project,
+            context.fileSection,
+            path + "(strref)",
+            strRefText(modified.strref));
+        context.changed = true;
     }
 
-    std::map<std::int32_t, std::string> origStrings;
-    for (const auto& sub : original.substrings) origStrings[sub.stringid] = sub.GetString();
-    std::map<std::int32_t, std::string> modStrings;
-    for (const auto& sub : modified.substrings) modStrings[sub.stringid] = sub.GetString();
+    std::map<std::int32_t, std::string> originalStrings;
+    std::map<std::int32_t, std::string> modifiedStrings;
+    for (const auto& sub : original.substrings) originalStrings[sub.stringid] = sub.GetString();
+    for (const auto& sub : modified.substrings) modifiedStrings[sub.stringid] = sub.GetString();
 
-    for (const auto& item : origStrings) {
-        if (modStrings.find(item.first) == modStrings.end()) {
-            ctx.project.unsupported.push_back("DLG localized-string substring deletion is not emitted: " + path + " lang" + std::to_string(item.first));
+    for (const auto& item : originalStrings) {
+        if (modifiedStrings.find(item.first) == modifiedStrings.end()) {
+            context.project.unsupported.push_back(
+                "TSLPatcher cannot delete localized text " + path +
+                " lang" + std::to_string(item.first) + ".");
         }
     }
-    for (const auto& item : modStrings) {
-        const auto found = origStrings.find(item.first);
-        if (found == origStrings.end() || found->second != item.second) {
-            addPlainEntry(ctx.project, ctx.fileSection, path + "(lang" + std::to_string(item.first) + ")", item.second);
+    for (const auto& item : modifiedStrings) {
+        const auto found = originalStrings.find(item.first);
+        if (found == originalStrings.end() || found->second != item.second) {
+            addPlainEntry(
+                context.project,
+                context.fileSection,
+                path + "(lang" + std::to_string(item.first) + ")",
+                encodeLocalizedText(item.second));
+            context.changed = true;
         }
     }
 }
 
-bool targetIndexIsNewForRoot(const DlgEmitContext& ctx, const std::string& rootList, std::size_t targetIndex) {
-    if (rootList == "EntryList") return targetIndex >= ctx.originalEntryCount;
-    if (rootList == "ReplyList") return targetIndex >= ctx.originalReplyCount;
-    return false;
-}
+void compareStructs(EmitContext& context,
+                    const GffStruct& original,
+                    const GffStruct& modified,
+                    const std::string& path,
+                    const std::string& dynamicLinkTargetRoot = {});
 
-std::vector<std::pair<std::size_t, const neodlg::GffStruct*>> findAddedLinkStructs(const neodlg::GffList* original,
-                                                                                  const neodlg::GffList& modified) {
-    std::map<std::string, std::size_t> remainingOriginal;
-    if (original) {
-        for (std::size_t i = 0; i < original->count(); ++i) {
-            const neodlg::GffStruct* structure = original->GetStruct(i);
-            if (structure) ++remainingOriginal[dlgStructSignature(*structure)];
-        }
-    }
-
-    std::vector<std::pair<std::size_t, const neodlg::GffStruct*>> out;
-    for (std::size_t i = 0; i < modified.count(); ++i) {
-        const neodlg::GffStruct* structure = modified.GetStruct(i);
-        if (!structure) continue;
-        const std::string sig = dlgStructSignature(*structure);
-        auto found = remainingOriginal.find(sig);
-        if (found != remainingOriginal.end() && found->second > 0) {
-            --found->second;
-            continue;
-        }
-        out.push_back({i, structure});
-    }
-    return out;
-}
-
-void emitLinkListAdditions(DlgEmitContext& ctx,
-                           const std::string& listPath,
-                           const std::string& listLabel,
-                           const neodlg::GffList* original,
-                           const neodlg::GffList& modified) {
-    if (original && modified.count() < original->count()) {
-        ctx.project.unsupported.push_back("DLG link list shrank; deletions are not emitted: " + listPath);
-    }
-    const std::string targetRoot = linkTargetRootForList(listLabel);
-    for (const auto& item : findAddedLinkStructs(original, modified)) {
-        const std::size_t modifiedIndex = item.first;
-        const neodlg::GffStruct* structure = item.second;
-        if (!structure) continue;
-        const auto targetIndex = dlgStructIndexValue(*structure);
-        const bool targetIsNew = targetIndex && targetIndexIsNewForRoot(ctx, targetRoot, *targetIndex);
-        const bool appending = !original || modifiedIndex >= original->count();
-        if (!appending) {
-            ctx.project.warnings.push_back("DLG link in " + listPath + " was inserted or reordered in the modified file; TSLPatcher/HoloPatcher will append it instead.");
-        }
-        if (!targetIsNew && !appending) {
-            ctx.project.unsupported.push_back("DLG existing link appears changed or reordered and does not point at a newly added node: " + listPath + "\\" + std::to_string(modifiedIndex));
-            continue;
-        }
-        emitDlgStruct(ctx, ctx.fileSection, *structure,
-                      DlgEmitStructOptions{listLabel, listPath, std::nullopt, targetRoot,
-                                           "dlg_link_" + sanitizeSectionName(listPath) + "_" + std::to_string(modifiedIndex)});
-    }
-}
-
-void compareDlgFields(DlgEmitContext& ctx,
-                      const neodlg::GffStruct& original,
-                      const neodlg::GffStruct& modified,
-                      const std::string& path);
-
-void compareDlgLists(DlgEmitContext& ctx,
-                     const neodlg::GffList& original,
-                     const neodlg::GffList& modified,
-                     const std::string& path) {
+void compareLists(EmitContext& context,
+                  const GffList& original,
+                  const GffList& modified,
+                  const std::string& path) {
     const std::string listLabel = modified.GetLabel();
-    if (listLabel == "EntryList" || listLabel == "ReplyList") {
-        if (modified.count() < original.count()) {
-            ctx.project.unsupported.push_back("DLG root node list shrank; deletions are not emitted: " + path);
-        }
-        const std::size_t common = std::min(original.count(), modified.count());
-        for (std::size_t i = 0; i < common; ++i) {
-            const auto* origStruct = original.GetStruct(i);
-            const auto* modStruct = modified.GetStruct(i);
-            if (origStruct && modStruct) compareDlgFields(ctx, *origStruct, *modStruct, appendPath(path, std::to_string(i)));
-        }
-        return;
-    }
-
-    if (isDlgLinkListLabel(listLabel)) {
-        emitLinkListAdditions(ctx, path, listLabel, &original, modified);
-        return;
-    }
 
     if (modified.count() < original.count()) {
-        ctx.project.unsupported.push_back("GFF list shrank; deletions are not emitted: " + path);
+        context.project.unsupported.push_back(
+            "TSLPatcher cannot delete list structures from " + path + ".");
     }
+
     const std::size_t common = std::min(original.count(), modified.count());
-    for (std::size_t i = 0; i < common; ++i) {
-        const auto* origStruct = original.GetStruct(i);
-        const auto* modStruct = modified.GetStruct(i);
-        if (origStruct && modStruct) compareDlgFields(ctx, *origStruct, *modStruct, appendPath(path, std::to_string(i)));
-    }
-    for (std::size_t i = original.count(); i < modified.count(); ++i) {
-        const auto* modStruct = modified.GetStruct(i);
-        if (!modStruct) continue;
-        emitDlgStruct(ctx, ctx.fileSection, *modStruct,
-                      DlgEmitStructOptions{listLabel, path, std::nullopt, linkTargetRootForList(listLabel),
-                                           "dlg_added_list_struct_" + sanitizeSectionName(path) + "_" + std::to_string(i)});
-    }
-}
+    const std::string targetRoot = isLinkList(listLabel)
+        ? targetRootForLinkList(listLabel)
+        : std::string{};
 
-void compareDlgFields(DlgEmitContext& ctx,
-                      const neodlg::GffStruct& original,
-                      const neodlg::GffStruct& modified,
-                      const std::string& path) {
-    std::map<std::string, const neodlg::GffField*> originalByLabel;
-    for (std::size_t i = 0; i < original.count(); ++i) {
-        const neodlg::GffField* field = original.GetField(i);
-        if (field) originalByLabel[field->GetLabel()] = field;
-    }
-
-    std::set<std::string> seenModified;
-    for (std::size_t i = 0; i < modified.count(); ++i) {
-        const neodlg::GffField* modField = modified.GetField(i);
-        if (!modField) continue;
-        const std::string label = modField->GetLabel();
-        seenModified.insert(label);
-        const std::string childPath = appendPath(path, label);
-        const auto found = originalByLabel.find(label);
-        if (found == originalByLabel.end()) {
-            if (modField->fieldtype == neodlg::FIELD_TYPE_LIST && isDlgLinkListLabel(label)) {
-                emitDlgField(ctx, ctx.fileSection, *modField, path, "dlg_added_" + sanitizeSectionName(childPath));
-            } else {
-                emitDlgField(ctx, ctx.fileSection, *modField, path, "dlg_added_" + sanitizeSectionName(childPath));
+    for (std::size_t index = 0; index < common; ++index) {
+        const GffStruct* before = original.GetStruct(index);
+        const GffStruct* after = modified.GetStruct(index);
+        if (!before || !after) {
+            if (before != after) {
+                context.project.unsupported.push_back(
+                    "A list structure slot changed between empty and populated at " +
+                    appendPath(path, std::to_string(index)) + ".");
             }
             continue;
         }
+        compareStructs(
+            context,
+            *before,
+            *after,
+            appendPath(path, std::to_string(index)),
+            targetRoot);
+    }
 
-        const neodlg::GffField* origField = found->second;
-        if (!origField) continue;
-        if (origField->fieldtype != modField->fieldtype) {
-            ctx.project.unsupported.push_back("GFF field type changed and was not emitted: " + childPath + " (" +
-                                              neodlg::fieldTypeName(origField->fieldtype) + " -> " +
-                                              neodlg::fieldTypeName(modField->fieldtype) + ")");
+    // EntryList and ReplyList additions are emitted before all other changes so
+    // their runtime-assigned indexes are available to every link token.
+    if (listLabel == "EntryList" || listLabel == "ReplyList") return;
+
+    for (std::size_t index = original.count(); index < modified.count(); ++index) {
+        const GffStruct* structure = modified.GetStruct(index);
+        if (!structure) {
+            context.project.unsupported.push_back(
+                "A newly added list structure is empty at " +
+                appendPath(path, std::to_string(index)) + ".");
+            continue;
+        }
+        emitStruct(
+            context,
+            context.fileSection,
+            *structure,
+            StructEmitOptions{
+                listLabel,
+                path,
+                std::nullopt,
+                targetRoot,
+                "neodlg_add_" + neotsl::sanitizeSectionName(path) + "_" +
+                    std::to_string(index),
+                true});
+    }
+}
+
+void compareStructs(EmitContext& context,
+                    const GffStruct& original,
+                    const GffStruct& modified,
+                    const std::string& path,
+                    const std::string& dynamicLinkTargetRoot) {
+    if (original.typeid_ != modified.typeid_) {
+        context.project.unsupported.push_back(
+            "TSLPatcher cannot change a structure TypeId at " +
+            (path.empty() ? std::string("root") : path) + ".");
+        return;
+    }
+    if (hasDuplicateLabels(original) || hasDuplicateLabels(modified)) {
+        if (!structDeepEqual(original, modified)) {
+            context.project.unsupported.push_back(
+                "A structure with duplicate field labels changed at " +
+                (path.empty() ? std::string("root") : path) + ".");
+        }
+        return;
+    }
+
+    std::map<std::string, const GffField*> originalFields;
+    for (std::size_t index = 0; index < original.count(); ++index) {
+        if (const GffField* field = original.GetField(index)) {
+            originalFields[field->GetLabel()] = field;
+        }
+    }
+
+    std::set<std::string> seen;
+    for (std::size_t index = 0; index < modified.count(); ++index) {
+        const GffField* after = modified.GetField(index);
+        if (!after) continue;
+        const std::string label = after->GetLabel();
+        seen.insert(label);
+        const std::string childPath = appendPath(path, label);
+
+        const auto found = originalFields.find(label);
+        if (found == originalFields.end()) {
+            emitField(
+                context,
+                context.fileSection,
+                *after,
+                path,
+                "neodlg_add_" + neotsl::sanitizeSectionName(childPath));
             continue;
         }
 
-        switch (modField->fieldtype) {
-        case neodlg::FIELD_TYPE_STRUCT:
-            compareDlgFields(ctx,
-                             dynamic_cast<const neodlg::GffStruct&>(*origField),
-                             dynamic_cast<const neodlg::GffStruct&>(*modField),
-                             childPath);
+        const GffField* before = found->second;
+        if (!before || before->fieldtype != after->fieldtype) {
+            context.project.unsupported.push_back(
+                "TSLPatcher cannot change the GFF field type at " + childPath + ".");
+            continue;
+        }
+
+        switch (after->fieldtype) {
+        case FIELD_TYPE_STRUCT:
+            compareStructs(
+                context,
+                dynamic_cast<const GffStruct&>(*before),
+                dynamic_cast<const GffStruct&>(*after),
+                childPath);
             break;
-        case neodlg::FIELD_TYPE_LIST:
-            compareDlgLists(ctx,
-                            dynamic_cast<const neodlg::GffList&>(*origField),
-                            dynamic_cast<const neodlg::GffList&>(*modField),
-                            childPath);
+        case FIELD_TYPE_LIST:
+            compareLists(
+                context,
+                dynamic_cast<const GffList&>(*before),
+                dynamic_cast<const GffList&>(*after),
+                childPath);
             break;
-        case neodlg::FIELD_TYPE_CEXOLOCSTRING:
-            emitDirectLocStringModifications(ctx,
-                                             childPath,
-                                             dynamic_cast<const neodlg::GffLocalizedStringField&>(*origField),
-                                             dynamic_cast<const neodlg::GffLocalizedStringField&>(*modField));
+        case FIELD_TYPE_CEXOLOCSTRING:
+            emitDirectLocStringModifications(
+                context,
+                childPath,
+                dynamic_cast<const GffLocalizedStringField&>(*before),
+                dynamic_cast<const GffLocalizedStringField&>(*after));
             break;
         default:
-            if (origField->GetString() != modField->GetString()) emitDirectScalarModification(ctx, childPath, *modField);
+            if (!dynamicLinkTargetRoot.empty() && label == "Index") {
+                const auto targetIndex = structIndexValue(modified);
+                const auto token = targetIndex
+                    ? tokenForRootTarget(context, dynamicLinkTargetRoot, *targetIndex)
+                    : std::nullopt;
+                if (token) {
+                    if (before->GetString() != *token) {
+                        addPlainEntry(context.project, context.fileSection, childPath, *token);
+                        context.changed = true;
+                    }
+                } else if (before->GetString() != after->GetString()) {
+                    emitDirectScalarModification(context, childPath, *after);
+                }
+            } else if (before->GetString() != after->GetString()) {
+                emitDirectScalarModification(context, childPath, *after);
+            }
             break;
         }
     }
 
-    for (const auto& item : originalByLabel) {
-        if (seenModified.find(item.first) == seenModified.end()) {
-            ctx.project.unsupported.push_back("GFF field deletion is not emitted: " + appendPath(path, item.first));
+    for (const auto& originalField : originalFields) {
+        if (!seen.count(originalField.first)) {
+            context.project.unsupported.push_back(
+                "TSLPatcher cannot delete GFF field " +
+                appendPath(path, originalField.first) + ".");
         }
     }
 }
 
-void allocateRootNodeTokens(DlgEmitContext& ctx, const std::string& listName, const neodlg::GffList* original, const neodlg::GffList* modified) {
-    const std::size_t originalCount = original ? original->count() : 0u;
-    const std::size_t modifiedCount = modified ? modified->count() : 0u;
-    for (std::size_t i = originalCount; i < modifiedCount; ++i) {
-        ctx.rootIndexTokens[dlgRootKey(listName, i)] = dlgToken(ctx);
+bool sameExistingRootNode(const GffStruct& original, const GffStruct& modified) {
+    if (original.typeid_ != modified.typeid_) return false;
+    const GffField* originalNodeId = fieldByLabel(original, "NodeID");
+    const GffField* modifiedNodeId = fieldByLabel(modified, "NodeID");
+    if (originalNodeId && modifiedNodeId) {
+        return originalNodeId->GetString() == modifiedNodeId->GetString();
+    }
+    return true;
+}
+
+void verifyRootPrefix(EmitContext& context,
+                      const std::string& listName,
+                      const GffList* original,
+                      const GffList* modified) {
+    if (!original || !modified) {
+        context.project.unsupported.push_back(
+            "The DLG is missing required root list " + listName + ".");
+        return;
+    }
+    if (modified->count() < original->count()) {
+        context.project.unsupported.push_back(
+            "TSLPatcher cannot delete nodes from " + listName + ".");
+        return;
+    }
+    for (std::size_t index = 0; index < original->count(); ++index) {
+        const GffStruct* before = original->GetStruct(index);
+        const GffStruct* after = modified->GetStruct(index);
+        if (!before || !after || !sameExistingRootNode(*before, *after)) {
+            context.project.unsupported.push_back(
+                listName + " was inserted into, removed from, or reordered before index " +
+                std::to_string(index) + ". Dynamic merge export requires new root nodes to be appended.");
+            return;
+        }
     }
 }
 
-void emitNewRootNodes(DlgEmitContext& ctx, const std::string& listName, const neodlg::GffList* original, const neodlg::GffList* modified) {
+void allocateRootTokens(EmitContext& context,
+                        const std::string& listName,
+                        const GffList* original,
+                        const GffList* modified) {
     if (!modified) return;
     const std::size_t originalCount = original ? original->count() : 0u;
-    if (modified->count() < originalCount) return;
-    for (std::size_t i = originalCount; i < modified->count(); ++i) {
-        const neodlg::GffStruct* structure = modified->GetStruct(i);
-        if (!structure) continue;
-        const auto token = tokenForDlgRootTarget(ctx, listName, i);
-        emitDlgStruct(ctx, ctx.fileSection, *structure,
-                      DlgEmitStructOptions{listName, listName, token, std::string{},
-                                           "dlg_new_" + sanitizeSectionName(listName) + "_" + std::to_string(i)});
+    for (std::size_t index = originalCount; index < modified->count(); ++index) {
+        context.rootIndexTokens[rootTokenKey(listName, index)] = allocateToken(context);
     }
 }
 
-void appendDeferredDlgAssignments(DlgEmitContext& ctx) {
-    for (const auto& item : ctx.deferredAssignments) {
-        addPlainEntry(ctx.project, ctx.fileSection, item.pathToken, item.valueToken);
+void emitNewRootNodes(EmitContext& context,
+                      const std::string& listName,
+                      const GffList* original,
+                      const GffList* modified) {
+    if (!modified) return;
+    const std::size_t originalCount = original ? original->count() : 0u;
+    for (std::size_t index = originalCount; index < modified->count(); ++index) {
+        const GffStruct* structure = modified->GetStruct(index);
+        if (!structure) {
+            context.project.unsupported.push_back(
+                "A new " + listName + " node is empty at local index " +
+                std::to_string(index) + ".");
+            continue;
+        }
+        const auto token = tokenForRootTarget(context, listName, index);
+        emitStruct(
+            context,
+            context.fileSection,
+            *structure,
+            StructEmitOptions{
+                listName,
+                listName,
+                token,
+                {},
+                "neodlg_new_" + listName + "_" + std::to_string(index),
+                true});
     }
 }
 
-void addDlgAwarenessWarnings(PatchProject& project) {
-    project.warnings.push_back("DLG-aware patcher output stores new EntryList/ReplyList indexes in 2DAMEMORY tokens and rewrites added link Index fields after creation.");
-    project.warnings.push_back("TSLPatcher/HoloPatcher append new list structs; inserted or reordered dialogue choices may appear at the end of their parent link list.");
+void appendDeferredAssignments(EmitContext& context) {
+    for (const auto& assignment : context.deferredAssignments) {
+        addPlainEntry(
+            context.project,
+            context.fileSection,
+            assignment.pathToken,
+            assignment.valueToken);
+        context.changed = true;
+    }
+}
+
+PatchProject makeDynamicMergeProject(const GffFile& original,
+                                     const GffFile& modified,
+                                     const std::string& patchFilename,
+                                     bool packageOutput,
+                                     const std::filesystem::path& baselineAsset,
+                                     const std::string& destination) {
+    PatchProject project;
+    project.add("GFFList", "File0", patchFilename);
+    project.add(patchFilename, "!Destination", normalizePatchDestination(destination));
+    if (packageOutput) {
+        project.add(patchFilename, "!SourceFile", patchFilename);
+        project.add(patchFilename, "!SaveAs", patchFilename);
+        project.assets.push_back(StagedAsset{baselineAsset, patchFilename, {}});
+    }
+
+    EmitContext context{project, patchFilename, 0u, 0u, {}, {}, 1, false};
+    const GffList* originalEntries = rootList(original, "EntryList");
+    const GffList* modifiedEntries = rootList(modified, "EntryList");
+    const GffList* originalReplies = rootList(original, "ReplyList");
+    const GffList* modifiedReplies = rootList(modified, "ReplyList");
+
+    context.originalEntryCount = originalEntries ? originalEntries->count() : 0u;
+    context.originalReplyCount = originalReplies ? originalReplies->count() : 0u;
+
+    verifyRootPrefix(context, "EntryList", originalEntries, modifiedEntries);
+    verifyRootPrefix(context, "ReplyList", originalReplies, modifiedReplies);
+
+    allocateRootTokens(context, "EntryList", originalEntries, modifiedEntries);
+    allocateRootTokens(context, "ReplyList", originalReplies, modifiedReplies);
+
+    // Node tokens must be created before links are compared or emitted.
+    emitNewRootNodes(context, "EntryList", originalEntries, modifiedEntries);
+    emitNewRootNodes(context, "ReplyList", originalReplies, modifiedReplies);
+
+    compareStructs(context, *original.root(), *modified.root(), {});
+    appendDeferredAssignments(context);
+
+    if (!context.changed && project.unsupported.empty()) {
+        throw std::runtime_error(
+            "The original and modified DLG files contain no patchable differences.");
+    }
+    return project;
 }
 
 } // namespace
 
-PatchProject diffDlgPatcher(const neodlg::GffFile& original,
-                            const neodlg::GffFile& modified,
+PatchProject makeCompleteDlgReplacement(GffFile& modified,
+                                               const std::string& patchFilename,
+                                               const std::string& destination) {
+    if (!modified.root()) {
+        throw std::runtime_error(
+            "Complete-DLG replacement requires a loaded modified DLG file.");
+    }
+    if (!isDlgType(modified)) {
+        throw std::runtime_error(
+            "Complete-DLG replacement requires a native DLG file.");
+    }
+    if (modified.isGff4()) {
+        throw std::runtime_error(
+            "TSLPatcher/HoloPatcher output supports classic GFF DLG files only.");
+    }
+    if (isJadeDlg(modified)) {
+        throw std::runtime_error(
+            "The TSLPatcher format targets KotOR and KotOR II. Jade Empire DLG files must be distributed separately.");
+    }
+    if (patchFilename.empty() ||
+        std::filesystem::path(patchFilename).filename() !=
+            std::filesystem::path(patchFilename)) {
+        throw std::runtime_error(
+            "The patch target must be a filename without directory components.");
+    }
+    return makeWholeFileReplacement(modified, patchFilename, destination);
+}
+
+PatchProject diffDlgPatcher(const GffFile& original,
+                            GffFile& modified,
                             const std::string& patchFilename,
-                            bool copyBaselineAsset,
-                            const std::filesystem::path& baselineAsset) {
+                            DlgPatchMode mode,
+                            bool packageOutput,
+                            const std::filesystem::path& baselineAsset,
+                            const std::string& destination) {
     if (!original.root() || !modified.root()) {
-        throw std::runtime_error("DLG patcher generation requires loaded original and modified DLG files.");
+        throw std::runtime_error(
+            "DLG patcher generation requires loaded original and modified DLG files.");
     }
     if (!isDlgType(original) || !isDlgType(modified)) {
-        throw std::runtime_error("DLG-aware patcher generation requires both files to have native file type DLG.");
+        throw std::runtime_error(
+            "DLG-aware patcher generation requires both files to have native file type DLG.");
     }
     if (original.isGff4() || modified.isGff4()) {
         throw std::runtime_error(
-            "DLG-aware TSLPatcher/HoloPatcher output supports canonical GFF3 DLG files only; GFF4 documents are not valid GFFList patch targets.");
+            "DLG-aware TSLPatcher/HoloPatcher output supports classic GFF DLG files only.");
+    }
+    if (isJadeDlg(original) || isJadeDlg(modified)) {
+        throw std::runtime_error(
+            "The TSLPatcher format targets KotOR and KotOR II. Jade Empire DLG files must be distributed separately.");
     }
     if (original.version() != modified.version()) {
         throw std::runtime_error("The original and modified DLG versions do not match.");
     }
-
-    PatchProject project;
-    project.add("GFFList", "File0", patchFilename);
-    project.section(patchFilename);
-    addAssetIfRequested(project, copyBaselineAsset, baselineAsset, patchFilename);
-    addDlgAwarenessWarnings(project);
-
-    DlgEmitContext ctx{project, patchFilename, 0u, 0u, {}, {}, 1};
-    const neodlg::GffList* origEntries = dlgRootList(original, "EntryList");
-    const neodlg::GffList* modEntries = dlgRootList(modified, "EntryList");
-    const neodlg::GffList* origReplies = dlgRootList(original, "ReplyList");
-    const neodlg::GffList* modReplies = dlgRootList(modified, "ReplyList");
-    ctx.originalEntryCount = origEntries ? origEntries->count() : 0u;
-    ctx.originalReplyCount = origReplies ? origReplies->count() : 0u;
-
-    if (!modEntries) project.unsupported.push_back("Modified DLG has no EntryList; output may not be useful.");
-    if (!modReplies) project.unsupported.push_back("Modified DLG has no ReplyList; output may not be useful.");
-    if (modEntries && origEntries && modEntries->count() < origEntries->count()) {
-        project.unsupported.push_back("Modified DLG EntryList has fewer nodes than the original; node deletion is not emitted.");
+    if (patchFilename.empty() ||
+        std::filesystem::path(patchFilename).filename() !=
+            std::filesystem::path(patchFilename)) {
+        throw std::runtime_error(
+            "The patch target must be a filename without directory components.");
     }
-    if (modReplies && origReplies && modReplies->count() < origReplies->count()) {
-        project.unsupported.push_back("Modified DLG ReplyList has fewer nodes than the original; node deletion is not emitted.");
+    if (structDeepEqual(*original.root(), *modified.root())) {
+        throw std::runtime_error(
+            "The original and modified DLG files contain no differences.");
     }
 
-    allocateRootNodeTokens(ctx, "EntryList", origEntries, modEntries);
-    allocateRootNodeTokens(ctx, "ReplyList", origReplies, modReplies);
+    if (mode == DlgPatchMode::CompleteReplacement) {
+        if (!packageOutput) {
+            throw std::runtime_error(
+                "Complete-DLG replacement requires package output because a fragment cannot carry the replacement DLG file.");
+        }
+        return makeCompleteDlgReplacement(modified, patchFilename, destination);
+    }
 
-    emitNewRootNodes(ctx, "EntryList", origEntries, modEntries);
-    emitNewRootNodes(ctx, "ReplyList", origReplies, modReplies);
-    compareDlgFields(ctx, *original.root(), *modified.root(), std::string{});
-    appendDeferredDlgAssignments(ctx);
+    if (packageOutput && baselineAsset.empty()) {
+        throw std::runtime_error(
+            "A clean baseline DLG is required when creating a dynamic merge package.");
+    }
 
-    return project;
+    return makeDynamicMergeProject(
+        original,
+        modified,
+        patchFilename,
+        packageOutput,
+        baselineAsset,
+        destination);
 }
 
 

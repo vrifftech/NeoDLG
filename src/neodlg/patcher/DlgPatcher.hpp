@@ -8,10 +8,22 @@
 
 namespace neodlg::patcher {
 
+enum class DlgPatchMode {
+    DynamicMerge,
+    CompleteReplacement,
+};
+
 neotsl::PatchProject diffDlgPatcher(const neodlg::GffFile& original,
-                                    const neodlg::GffFile& modified,
+                                    neodlg::GffFile& modified,
                                     const std::string& patchFilename,
-                                    bool copyBaselineAsset = true,
-                                    const std::filesystem::path& baselineAsset = {});
+                                    DlgPatchMode mode = DlgPatchMode::DynamicMerge,
+                                    bool packageOutput = true,
+                                    const std::filesystem::path& baselineAsset = {},
+                                    const std::string& destination = "override");
+
+neotsl::PatchProject makeCompleteDlgReplacement(neodlg::GffFile& modified,
+                                                  const std::string& patchFilename,
+                                                  const std::string& destination = "override");
+
 
 } // namespace neodlg::patcher

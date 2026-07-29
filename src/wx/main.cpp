@@ -2526,21 +2526,107 @@ private:
     void onExportPatcherPackage(wxCommandEvent&) {
         if (!model().loaded() || model().gff().isGff4()) return;
         try {
-            const auto originalPath = wxui::chooseOpenFile(this, "Select clean/unmodified DLG", kDlgWildcard);
-            if (!originalPath) return;
+            wxArrayString modeChoices;
+            modeChoices.Add("Dynamic merge instructions (recommended)");
+            modeChoices.Add("Complete modified DLG replacement");
+            wxSingleChoiceDialog modeDialog(
+                this,
+                "Choose how the package should install this dialogue.\n\n"
+                "Dynamic merge appends new Entry and Reply nodes at installation time and connects them with ListIndex and 2DAMEMORY tokens. It is merge-friendly, but requires original TSLPatcher 1.2.10b1 or a HoloPatcher release that supports the same dynamic GFF syntax. Changes such as deletion or root-list reordering are rejected.\n\n"
+                "Complete replacement installs the entire modified DLG. It does not use dynamic tokens and works with patchers that cannot process TypeId=ListIndex, but it can conflict with another mod that replaces the same DLG.",
+                "TSLPatcher Export Mode",
+                modeChoices);
+            modeDialog.SetSelection(0);
+            if (modeDialog.ShowModal() != wxID_OK) return;
+
+            const auto patchMode = modeDialog.GetSelection() == 0
+                ? neodlg::patcher::DlgPatchMode::DynamicMerge
+                : neodlg::patcher::DlgPatchMode::CompleteReplacement;
+
+            std::optional<std::filesystem::path> originalPath;
+            if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
+                originalPath = wxui::chooseOpenFile(
+                    this,
+                    "Select clean/unmodified DLG",
+                    kDlgWildcard);
+                if (!originalPath) return;
+            }
+
             std::string defaultName = model().filename().empty() ? "modified.dlg" : neosettings::pathToUtf8(model().filename().filename());
             const auto patchName = wxui::promptText(this, "Patch Target Filename",
                                                      "DLG filename to patch in the user's install:", defaultName);
             if (!patchName || patchName->empty()) return;
+
+            wxArrayString destinationChoices;
+            destinationChoices.Add("Override folder");
+            destinationChoices.Add("Module or archive inside the game directory...");
+            wxSingleChoiceDialog destinationDialog(
+                this,
+                "Choose where TSLPatcher/HoloPatcher should install the patched DLG.\n\n"
+                "Use Override for a loose DLG. Use a module/archive destination when the DLG must be patched inside a .mod, .rim, or .erf file.",
+                "Patch Destination",
+                destinationChoices);
+            destinationDialog.SetSelection(0);
+            if (destinationDialog.ShowModal() != wxID_OK) return;
+
+            std::string destination = "override";
+            if (destinationDialog.GetSelection() == 1) {
+                const auto archivePath = wxui::promptText(
+                    this,
+                    "Module or Archive Destination",
+                    "Path relative to the game directory, for example Modules\\101PER.mod:",
+                    "Modules\\");
+                if (!archivePath) return;
+                destination = trimAscii(*archivePath);
+                if (destination.empty()) {
+                    throw std::runtime_error("The module/archive destination cannot be empty.");
+                }
+            }
+
             const auto outputDir = wxui::chooseDirectory(this, "Choose tslpatchdata package folder");
             if (!outputDir) return;
-            GffModel original;
-            original.load(*originalPath);
-            auto project = neodlg::patcher::diffDlgPatcher(original.gff(), model().gff(), *patchName, true, *originalPath);
+            neotsl::PatchProject project;
+            if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
+                GffModel original;
+                original.load(*originalPath);
+                project = neodlg::patcher::diffDlgPatcher(
+                    original.gff(),
+                    model().gff(),
+                    *patchName,
+                    patchMode,
+                    true,
+                    *originalPath,
+                    destination);
+            } else {
+                project = neodlg::patcher::makeCompleteDlgReplacement(
+                    model().gff(),
+                    *patchName,
+                    destination);
+            }
+
+            if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge &&
+                !project.unsupported.empty()) {
+                try {
+                    neotsl::throwIfUnsupported(project);
+                } catch (const std::exception& ex) {
+                    throw std::runtime_error(
+                        std::string(ex.what()) +
+                        "\n\nDynamic merge mode cannot represent this edit. "
+                        "Choose Complete modified DLG replacement if a whole-file install is acceptable.");
+                }
+            }
+
             neotsl::throwIfUnsupported(project);
             neotsl::writePackage(project, *outputDir, true);
-            wxui::showMessage(this, "TSL/HoloPatcher Package",
-                              "Wrote changes.ini and the clean baseline DLG to:\n" + neosettings::pathToUtf8(*outputDir));
+
+            const std::string detail = patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge
+                ? "The package uses TSLPatcher's dynamic ListIndex and 2DAMEMORY workflow. New Entry and Reply nodes receive their actual indexes during installation, and generated link fields are updated to those indexes automatically."
+                : "The package installs the complete modified DLG and does not use dynamic ListIndex or 2DAMEMORY wiring. This mode is less merge-friendly when another mod replaces the same DLG.";
+            wxui::showMessage(
+                this,
+                "TSL/HoloPatcher Package",
+                "Wrote changes.ini, info.rtf, and the required DLG file to:\n" +
+                    neosettings::pathToUtf8(*outputDir) + "\n\n" + detail);
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
 
