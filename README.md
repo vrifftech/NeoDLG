@@ -2,9 +2,9 @@
 
 [![CI](https://github.com/vrifftech/NeoDLG/actions/workflows/ci.yml/badge.svg)](https://github.com/vrifftech/NeoDLG/actions/workflows/ci.yml)
 
-NeoDLG is a purpose-built conversation editor for BioWare `DLG` resources. It edits the dialogue graph directly instead of presenting a DLG as a generic table of GFF fields.
+NeoDLG is a purpose-built conversation editor for BioWare `DLG` resources.
 
-The semantic editor supports:
+Theeditor supports:
 
 - Star Wars: Knights of the Old Republic dialogue graphs.
 - Star Wars: Knights of the Old Republic II dialogue graphs, including second scripts, conditional parameters, node IDs, camera fields, VO flags, emotions, and post-processing fields.
@@ -12,7 +12,6 @@ The semantic editor supports:
 - Optional TLK lookup for resolved dialogue text.
 - A structured GFF tree for unusual fields and unsupported DLG schemas.
 
-The design retains the useful workflow of the classic DLGEditor—entries, replies, starting links, conditionals, scripts, animations, stunts, search, and orphan handling—while replacing its implementation-oriented tree editing with explicit node and link operations.
 
 ## Conversation editor
 
@@ -89,21 +88,6 @@ NeoDLG supports multiple open documents, recent files, undo/redo snapshots, dark
 
 Classic DLG documents can be imported or exported as hierarchical XML or JSON. NeoDLG can also create a DLG-aware TSLPatcher/HoloPatcher package from a clean original and a modified conversation.
 
-## CLI
-
-The command-line utility is `neodlg-cli`.
-
-```text
-neodlg-cli info <dlg> [--tlk dialog.tlk]
-neodlg-cli dump <dlg> [filter-term] [--tlk dialog.tlk]
-neodlg-cli search <dlg> <term> [--tlk dialog.tlk]
-neodlg-cli export <dlg> <xml|json> <output>
-neodlg-cli import <input-dlg> <output-dlg> <xml|json> <input-document>
-neodlg-cli roundtrip <input-dlg> <output-dlg>
-neodlg-cli diff-tslpatcher <original-dlg> <modified-dlg> <output-dir|fragment.ini> [options]
-```
-
-The low-level `set-value`, `add-field`, and `delete-field` commands remain available for automation and unusual fields.
 
 ## Repository layout
 
@@ -151,6 +135,3 @@ Windows with the shared wxWidgets overlay:
 
 Use `--wx OFF` or `-Wx OFF` for a core/CLI-only build.
 
-## Platform icons
-
-`resources/neodlg.svg` is the canonical artwork. Windows ICO, macOS ICNS, Linux PNG/scalable icons, and the wxWidgets fallback icon are derived from it.
