@@ -4,13 +4,13 @@
 
 NeoDLG is a purpose-built conversation editor for BioWare `DLG` resources.
 
-Theeditor supports:
+The editor supports:
 
 - Star Wars: Knights of the Old Republic dialogue graphs.
 - Star Wars: Knights of the Old Republic II dialogue graphs, including second scripts, conditional parameters, node IDs, camera fields, VO flags, emotions, and post-processing fields.
 - Jade Empire dialogue graphs, including positional `TagList` participants, Jade string references, voice-over IDs, entry/reply camera scripts and tags, entry animation performers, reply animation/emotion pairs, skippable entries, designer numbers, and reversed conditions.
-- Optional TLK lookup for resolved dialogue text.
-- A structured GFF tree for unusual fields and unsupported DLG schemas.
+- TLK lookup for resolved dialogue text.
+- A structured GFF tree view.
 
 
 ## Conversation editor
@@ -57,9 +57,9 @@ For Jade Empire, only fields present in Jade's runtime DLG schema are shown:
 - **Entry Animations** — an ordered `AnimationList` whose `Index` selects a participant from the root `TagList`, independent of the animation row number.
 - **Reply Animation** — the singular `Animation`/`Emotion` pair stored directly on the Reply; `65535` is the unset animation value.
 
-KotOR-only presentation controls are hidden for Jade documents. The GFF Tree remains available for uncommon fields without presenting them as part of the Jade semantic schema.
+KotOR-only presentation controls are hidden for Jade documents. The GFF Tree remains available for uncommon fields.
 
-For KotOR and KotOR II conversations, the Presentation page uses constrained runtime-aware controls:
+For KotOR and KotOR II conversations, the Presentation page the controls:
 
 - Camera angle is limited to Automatic, calculated presets 1–3, or Placed camera; an unknown value already present in a file remains preservable.
 - Camera ID remains an exposed integer and is enabled for Placed camera mode. NeoDLG does not yet resolve IDs from the current area GIT.
@@ -99,7 +99,6 @@ workspace/
   NeoDLG/
 ```
 
-The build also accepts a lowercase sibling named `neoshared`. For another layout, pass the shared source path explicitly.
 
 ## Build
 
