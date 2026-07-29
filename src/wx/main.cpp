@@ -29,6 +29,7 @@
 #include <wx/statline.h>
 #include <wx/treectrl.h>
 #include <wx/wupdlock.h>
+#include <wx/wrapsizer.h>
 #include <wx/wx.h>
 
 #include <algorithm>
@@ -371,7 +372,9 @@ public:
         root->Add(form, 1, wxEXPAND | wxALL, 12);
         root->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 12);
         SetSizerAndFit(root);
-        SetMinSize(FromDIP(wxSize(500, 240)));
+        wxui::configureResponsiveWindow(*this, wxSize(560, 320), wxSize(420, 220));
+        CentreOnParent();
+        wxui::constrainWindowToDisplay(*this);
     }
 
     DlgAnimation value() const {
@@ -535,8 +538,9 @@ public:
 
         root->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
         SetSizer(root);
-        SetMinSize(FromDIP(wxSize(680, 540)));
-        SetInitialSize(FromDIP(wxSize(760, 620)));
+        wxui::configureResponsiveWindow(*this, wxSize(760, 620), wxSize(560, 400));
+        CentreOnParent();
+        wxui::constrainWindowToDisplay(*this);
     }
 
     void apply(DlgDocument& document) const {
@@ -753,8 +757,9 @@ public:
         root->Add(list_, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
         root->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
         SetSizer(root);
-        SetMinSize(FromDIP(wxSize(900, 520)));
-        SetInitialSize(FromDIP(wxSize(980, 620)));
+        wxui::configureResponsiveWindow(*this, wxSize(980, 620), wxSize(620, 380));
+        CentreOnParent();
+        wxui::constrainWindowToDisplay(*this);
     }
 
     std::optional<DlgIssue> selectedIssue() const {
@@ -909,8 +914,7 @@ public:
         createDocumentTab(true);
         tryLoadCachedTlk();
         applyDarkMode();
-        SetMinSize(FromDIP(wxSize(980, 650)));
-        SetInitialSize(FromDIP(wxSize(1420, 900)));
+        wxui::configureResponsiveWindow(*this, wxSize(1420, 900), wxSize(720, 480));
         settings_.restoreWindowPlacement(*this);
         refreshAll();
     }
@@ -1179,22 +1183,29 @@ private:
         auto* page = new wxPanel(parent);
         auto* root = new wxBoxSizer(wxVERTICAL);
 
-        auto* toolbar = new wxBoxSizer(wxHORIZONTAL);
-        toolbar->Add(new wxButton(page, ID_AddStartingEntry, "Add Start Entry"), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_AddChild, "Add Child"), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_LinkExisting, "Link Existing..."), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_DuplicateNode, "Duplicate"), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_RemoveLink, "Remove Link"), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_DeleteNode, "Delete Node"), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_MoveLinkUp, "Up"), 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_MoveLinkDown, "Down"), 0, wxRIGHT, 12);
-        toolbar->AddStretchSpacer(1);
-        toolbar->Add(new wxStaticText(page, wxID_ANY, "Find:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 4);
+        auto* toolbar = new wxWrapSizer(wxHORIZONTAL);
+        const auto addToolbarButton = [&](int id, const wxString& label) {
+            toolbar->Add(new wxButton(page, id, label), 0,
+                         wxRIGHT | wxBOTTOM, FromDIP(4));
+        };
+        addToolbarButton(ID_AddStartingEntry, "Add Start Entry");
+        addToolbarButton(ID_AddChild, "Add Child");
+        addToolbarButton(ID_LinkExisting, "Link Existing...");
+        addToolbarButton(ID_DuplicateNode, "Duplicate");
+        addToolbarButton(ID_RemoveLink, "Remove Link");
+        addToolbarButton(ID_DeleteNode, "Delete Node");
+        addToolbarButton(ID_MoveLinkUp, "Up");
+        addToolbarButton(ID_MoveLinkDown, "Down");
+        root->Add(toolbar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
+
+        auto* findRow = new wxBoxSizer(wxHORIZONTAL);
+        findRow->Add(new wxStaticText(page, wxID_ANY, "Find:"), 0,
+                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
         findText_ = new wxTextCtrl(page, wxID_ANY);
-        findText_->SetMinSize(FromDIP(wxSize(240, -1)));
-        toolbar->Add(findText_, 0, wxRIGHT, 4);
-        toolbar->Add(new wxButton(page, ID_FindNext, "Next"), 0);
-        root->Add(toolbar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 6);
+        findText_->SetMinSize(FromDIP(wxSize(160, -1)));
+        findRow->Add(findText_, 1, wxEXPAND | wxRIGHT, FromDIP(4));
+        findRow->Add(new wxButton(page, ID_FindNext, "Next"), 0);
+        root->Add(findRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(6));
 
         auto* splitter = new wxSplitterWindow(page, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                                wxSP_LIVE_UPDATE | wxSP_3D);
