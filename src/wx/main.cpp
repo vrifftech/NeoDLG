@@ -9,6 +9,7 @@
 #include "NeoDocumentTabs.hpp"
 #include "NeoGameDirectoryMenu.hpp"
 #include "NeoSettings.hpp"
+#include "NeoTreeState.hpp"
 #include "NeoViewState.hpp"
 #include "NeoWxUi.hpp"
 #include "TslPatcher.hpp"
@@ -807,14 +808,30 @@ public:
     ConversationTreeData(ConversationTreeKind itemKind,
                          std::optional<DlgNodeRef> nodeRef = std::nullopt,
                          std::optional<DlgLinkRef> linkRef = std::nullopt,
-                         bool referenceOnly = false)
-        : kind(itemKind), node(std::move(nodeRef)), link(std::move(linkRef)), reference(referenceOnly) {}
+                         bool referenceOnly = false,
+                         std::string stableKey = {})
+        : kind(itemKind), node(std::move(nodeRef)), link(std::move(linkRef)),
+          reference(referenceOnly), key(std::move(stableKey)) {}
 
     ConversationTreeKind kind = ConversationTreeKind::Group;
     std::optional<DlgNodeRef> node;
     std::optional<DlgLinkRef> link;
     bool reference = false;
+    std::string key;
 };
+
+std::string conversationNodeKey(DlgNodeRef ref) {
+    return std::string(ref.kind == DlgNodeKind::Entry ? "entry:" : "reply:") +
+           std::to_string(ref.index);
+}
+
+std::string conversationLinkKey(DlgLinkRef ref) {
+    char owner = 'S';
+    if (ref.owner == DlgLinkOwner::Entry) owner = 'E';
+    else if (ref.owner == DlgLinkOwner::Reply) owner = 'R';
+    return std::string("link:") + owner + ":" + std::to_string(ref.ownerIndex) +
+           ":" + std::to_string(ref.position);
+}
 
 
 std::string gffTreeParentPath(std::string path) {
@@ -963,6 +980,9 @@ private:
         int workspacePage = 0;
         std::optional<DlgNodeRef> selectedNode;
         std::optional<DlgLinkRef> selectedLink;
+        neotree::TreeViewState conversationTreeState;
+        neotree::TreeViewState rawTreeState;
+        std::string rawFilterTerm;
         std::vector<UndoSnapshot> undo;
         std::vector<UndoSnapshot> redo;
     };
@@ -1720,10 +1740,58 @@ private:
         root->Add(rawTree_, 1, wxEXPAND);
         page->SetSizer(root);
         parent->AddPage(page, "GFF Tree", false);
-        rawFilter_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) { refreshRawTree(); });
+        rawFilter_->Bind(wxEVT_TEXT, [this](wxCommandEvent&) {
+            if (hasActiveDocument()) {
+                activeDocument().rawFilterTerm = wxui::toStd(rawFilter_->GetValue());
+            }
+            refreshRawTree();
+        });
+    }
+
+    std::string conversationTreeItemKey(const wxTreeItemId& item) const {
+        if (!conversationTree_ || !item.IsOk()) return {};
+        if (auto* data = dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(item))) {
+            return data->key;
+        }
+        return {};
+    }
+
+    std::string rawTreeItemKey(const wxTreeItemId& item) const {
+        if (!rawTree_ || !item.IsOk()) return {};
+        if (item == rawTree_->GetRootItem()) return "$root";
+        if (auto* data = dynamic_cast<RawGffTreeItemData*>(rawTree_->GetItemData(item))) {
+            return data->path();
+        }
+        return {};
+    }
+
+    void captureRenderedConversationTreeState() {
+        if (!conversationTree_ || !hasActiveDocument() ||
+            conversationTreeRenderedDocumentPage_ != activeDocument().tabPage) {
+            return;
+        }
+        neotree::captureTreeViewState(
+            *conversationTree_, activeDocument().conversationTreeState,
+            [this](const wxTreeItemId& item) { return conversationTreeItemKey(item); });
+    }
+
+    void captureRenderedRawTreeState() {
+        if (!rawTree_ || !hasActiveDocument() ||
+            rawTreeRenderedDocumentPage_ != activeDocument().tabPage) {
+            return;
+        }
+        neotree::captureTreeViewState(
+            *rawTree_, activeDocument().rawTreeState,
+            [this](const wxTreeItemId& item) { return rawTreeItemKey(item); });
+    }
+
+    void captureRenderedTreeStates() {
+        captureRenderedConversationTreeState();
+        captureRenderedRawTreeState();
     }
 
     void createDocumentTab(bool select) {
+        if (select && hasActiveDocument()) captureRenderedTreeStates();
         DocumentTab tab;
         const std::size_t previous = activeDocumentIndex_;
         documents_.push_back(std::move(tab));
@@ -1756,10 +1824,12 @@ private:
 
     void selectDocumentTab(std::size_t index) {
         if (index >= documents_.size()) return;
+        if (hasActiveDocument() && index != activeDocumentIndex_) captureRenderedTreeStates();
         tabSwitchInProgress_ = true;
         neotabs::changeSelectionToPage(documentTabs_, documents_[index].tabPage);
         tabSwitchInProgress_ = false;
         activeDocumentIndex_ = index;
+        if (rawFilter_) rawFilter_->ChangeValue(wxui::toWx(activeDocument().rawFilterTerm));
         setWorkspacePage(activeDocument().workspacePage, false);
         refreshAll();
     }
@@ -1772,6 +1842,8 @@ private:
     bool closeDocument(std::size_t index) {
         if (index >= documents_.size() || !confirmCloseDocument(index)) return false;
         wxWindow* page = documents_[index].tabPage;
+        if (conversationTreeRenderedDocumentPage_ == page) conversationTreeRenderedDocumentPage_ = nullptr;
+        if (rawTreeRenderedDocumentPage_ == page) rawTreeRenderedDocumentPage_ = nullptr;
         tabSwitchInProgress_ = true;
         const bool deleted = neotabs::deleteTabPage(documentTabs_, page);
         tabSwitchInProgress_ = false;
@@ -1805,6 +1877,12 @@ private:
             activeDocument().redo.clear();
             activeDocument().selectedNode.reset();
             activeDocument().selectedLink.reset();
+            activeDocument().conversationTreeState.reset();
+            activeDocument().rawTreeState.reset();
+            activeDocument().rawFilterTerm.clear();
+            if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) conversationTreeRenderedDocumentPage_ = nullptr;
+            if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) rawTreeRenderedDocumentPage_ = nullptr;
+            if (rawFilter_) rawFilter_->ChangeValue(wxString{});
             setWorkspacePage(0);
             refreshAll();
         } catch (const std::exception& ex) {
@@ -1832,6 +1910,12 @@ private:
         activeDocument().redo.clear();
         activeDocument().selectedNode.reset();
         activeDocument().selectedLink.reset();
+        activeDocument().conversationTreeState.reset();
+        activeDocument().rawTreeState.reset();
+        activeDocument().rawFilterTerm.clear();
+        if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) conversationTreeRenderedDocumentPage_ = nullptr;
+        if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) rawTreeRenderedDocumentPage_ = nullptr;
+        if (rawFilter_) rawFilter_->ChangeValue(wxString{});
         tryLoadResolvedTlkForPath(path);
         rememberRecentFile(path);
         neogames::resolver().inferFromOpenedPath(path);
@@ -2746,61 +2830,98 @@ private:
         }
     }
 
+    wxTreeItemId conversationTreeItemForKey(const std::string& key) const {
+        const auto found = conversationTreeItemsByKey_.find(key);
+        return found == conversationTreeItemsByKey_.end() ? wxTreeItemId{} : found->second;
+    }
+
     void refreshConversationTree() {
+        if (!conversationTree_ || !hasActiveDocument()) return;
+        if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) {
+            captureRenderedConversationTreeState();
+        }
+
         treeRefreshInProgress_ = true;
         conversationTree_->Freeze();
         conversationTree_->DeleteAllItems();
         canonicalTreeItems_.clear();
+        conversationTreeItemsByKey_.clear();
 
-        const wxTreeItemId rootItem = conversationTree_->AddRoot("Conversation",
-            -1, -1, new ConversationTreeData(ConversationTreeKind::ConversationRoot));
+        constexpr const char* kRootKey = "conversation";
+        constexpr const char* kStartsKey = "conversation/starts";
+        constexpr const char* kUnreachableKey = "conversation/unreachable";
+        const wxTreeItemId rootItem = conversationTree_->AddRoot(
+            "Conversation", -1, -1,
+            new ConversationTreeData(ConversationTreeKind::ConversationRoot,
+                                     std::nullopt, std::nullopt, false, kRootKey));
+        conversationTreeItemsByKey_[kRootKey] = rootItem;
+
+        wxTreeItemId starts;
         if (!model().loaded()) {
             conversationTree_->AppendItem(rootItem, "Open or create a DLG to begin.");
-            conversationTree_->Expand(rootItem);
-            conversationTree_->Thaw();
-            treeRefreshInProgress_ = false;
-            return;
-        }
+        } else {
+            DlgDocument document = dialogue();
+            if (!document.semanticallyEditable()) {
+                conversationTree_->AppendItem(
+                    rootItem,
+                    "This DLG schema is not supported by the conversation editor. Use GFF Tree view.");
+            } else {
+                starts = conversationTree_->AppendItem(
+                    rootItem, "Starting Nodes", -1, -1,
+                    new ConversationTreeData(ConversationTreeKind::Group,
+                                             std::nullopt, std::nullopt, false, kStartsKey));
+                conversationTreeItemsByKey_[kStartsKey] = starts;
+                std::vector<DlgNodeRef> ancestry;
+                for (DlgLinkRef ref : document.startingLinks()) {
+                    appendLinkBranch(starts, ref, ancestry, 0);
+                }
 
-        DlgDocument document = dialogue();
-        if (!document.semanticallyEditable()) {
-            conversationTree_->AppendItem(rootItem,
-                "This DLG schema is not supported by the conversation editor. Use GFF Tree view.");
-            conversationTree_->Expand(rootItem);
-            conversationTree_->Thaw();
-            treeRefreshInProgress_ = false;
-            return;
-        }
-
-        const wxTreeItemId starts = conversationTree_->AppendItem(rootItem, "Starting Nodes",
-            -1, -1, new ConversationTreeData(ConversationTreeKind::Group));
-        std::vector<DlgNodeRef> ancestry;
-        for (DlgLinkRef ref : document.startingLinks()) appendLinkBranch(starts, ref, ancestry, 0);
-
-        const auto unreachable = document.unreachableNodes();
-        if (!unreachable.empty()) {
-            const wxTreeItemId orphanGroup = conversationTree_->AppendItem(
-                rootItem, wxString::Format("Unreachable Nodes (%zu)", unreachable.size()),
-                -1, -1, new ConversationTreeData(ConversationTreeKind::Group));
-            for (DlgNodeRef ref : unreachable) {
-                if (canonicalTreeItems_.count(ref)) continue;
-                const wxTreeItemId item = conversationTree_->AppendItem(
-                    orphanGroup, wxui::toWx("[unreachable] " + document.nodeLabel(ref)),
-                    -1, -1, new ConversationTreeData(ConversationTreeKind::Node, ref, std::nullopt, false));
-                styleTreeNode(item, ref, true);
-                canonicalTreeItems_[ref] = item;
-                ancestry.clear();
-                ancestry.push_back(ref);
-                for (DlgLinkRef child : document.outgoingLinks(ref)) appendLinkBranch(item, child, ancestry, 1);
+                const auto unreachable = document.unreachableNodes();
+                if (!unreachable.empty()) {
+                    const wxTreeItemId orphanGroup = conversationTree_->AppendItem(
+                        rootItem, wxString::Format("Unreachable Nodes (%zu)", unreachable.size()),
+                        -1, -1, new ConversationTreeData(ConversationTreeKind::Group,
+                                                        std::nullopt, std::nullopt, false,
+                                                        kUnreachableKey));
+                    conversationTreeItemsByKey_[kUnreachableKey] = orphanGroup;
+                    for (DlgNodeRef ref : unreachable) {
+                        if (canonicalTreeItems_.count(ref)) continue;
+                        const std::string itemKey = std::string(kUnreachableKey) + "/" + conversationNodeKey(ref);
+                        const wxTreeItemId item = conversationTree_->AppendItem(
+                            orphanGroup, wxui::toWx("[unreachable] " + document.nodeLabel(ref)),
+                            -1, -1, new ConversationTreeData(ConversationTreeKind::Node, ref,
+                                                            std::nullopt, false, itemKey));
+                        conversationTreeItemsByKey_[itemKey] = item;
+                        styleTreeNode(item, ref, true);
+                        canonicalTreeItems_[ref] = item;
+                        ancestry.clear();
+                        ancestry.push_back(ref);
+                        for (DlgLinkRef child : document.outgoingLinks(ref)) {
+                            appendLinkBranch(item, child, ancestry, 1);
+                        }
+                    }
+                }
             }
         }
 
-        conversationTree_->Expand(rootItem);
-        conversationTree_->Expand(starts);
+        const neotree::TreeViewState& state = activeDocument().conversationTreeState;
+        neotree::TreeRestoreResult restored;
+        if (state.initialized) {
+            restored = neotree::restoreTreeViewState(
+                *conversationTree_, state,
+                [this](const std::string& key) { return conversationTreeItemForKey(key); });
+        } else {
+            conversationTree_->Expand(rootItem);
+            if (starts.IsOk()) conversationTree_->Expand(starts);
+        }
+
+        conversationTreeRenderedDocumentPage_ = activeDocument().tabPage;
         conversationTree_->Thaw();
         treeRefreshInProgress_ = false;
 
-        if (activeDocument().selectedNode) selectSemanticNode(*activeDocument().selectedNode, activeDocument().selectedLink, false);
+        if (!restored.selectionRestored && activeDocument().selectedNode) {
+            selectSemanticNode(*activeDocument().selectedNode, activeDocument().selectedLink, false);
+        }
     }
 
     void appendLinkBranch(const wxTreeItemId& parent,
@@ -2810,9 +2931,12 @@ private:
         DlgDocument document = dialogue();
         const auto target = document.targetOf(linkRef);
         if (!target) {
+            const std::string itemKey = conversationLinkKey(linkRef);
             const wxTreeItemId invalid = conversationTree_->AppendItem(
                 parent, "[invalid link]", -1, -1,
-                new ConversationTreeData(ConversationTreeKind::InvalidLink, std::nullopt, linkRef));
+                new ConversationTreeData(ConversationTreeKind::InvalidLink, std::nullopt,
+                                         linkRef, false, itemKey));
+            conversationTreeItemsByKey_[itemKey] = invalid;
             conversationTree_->SetItemTextColour(invalid, darkMode_ ? wxColour(255, 130, 130) : wxColour(170, 0, 0));
             return;
         }
@@ -2826,9 +2950,12 @@ private:
         const std::string condition = linkConditionSummary(document, linkRef);
         if (!condition.empty()) label += "  (" + condition + ")";
 
+        const std::string itemKey = conversationLinkKey(linkRef);
         const wxTreeItemId item = conversationTree_->AppendItem(
             parent, wxui::toWx(label), -1, -1,
-            new ConversationTreeData(ConversationTreeKind::Node, *target, linkRef, cycle || reference));
+            new ConversationTreeData(ConversationTreeKind::Node, *target, linkRef,
+                                     cycle || reference, itemKey));
+        conversationTreeItemsByKey_[itemKey] = item;
         styleTreeNode(item, *target, false);
         if (cycle || reference || depth >= 512) return;
         canonicalTreeItems_[*target] = item;
@@ -3220,6 +3347,7 @@ private:
                 parentItem, wxui::toWx(gffTreeText(row)), -1, -1,
                 new RawGffTreeItemData(row.path, static_cast<int>(rowIndex)));
             rawTreeRowItems_[rowIndex] = item;
+            rawTreeItemsByPath_[row.path] = item;
             const auto grandchildren = rawTreeChildrenByParent_.find(row.path);
             if (grandchildren != rawTreeChildrenByParent_.end() && !grandchildren->second.empty()) {
                 rawTree_->SetItemHasChildren(item, true);
@@ -3227,15 +3355,41 @@ private:
         }
     }
 
+    wxTreeItemId ensureRawTreeItemForKey(const std::string& key) {
+        if (!rawTree_) return {};
+        const wxTreeItemId root = rawTree_->GetRootItem();
+        if (key == "$root") return root;
+
+        const auto existing = rawTreeItemsByPath_.find(key);
+        if (existing != rawTreeItemsByPath_.end() && existing->second.IsOk()) {
+            return existing->second;
+        }
+
+        const std::string parentPath = gffTreeParentPath(key);
+        const wxTreeItemId parent = parentPath.empty()
+            ? root
+            : ensureRawTreeItemForKey(parentPath);
+        if (!parent.IsOk()) return {};
+        materializeRawTreeChildren(parent, parentPath);
+
+        const auto created = rawTreeItemsByPath_.find(key);
+        return created == rawTreeItemsByPath_.end() ? wxTreeItemId{} : created->second;
+    }
+
     void refreshRawTree() {
         if (!rawTree_ || !hasActiveDocument()) return;
+        if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) {
+            captureRenderedRawTreeState();
+        }
+
         wxWindowUpdateLocker updateLocker(rawTree_);
         rawRows_.clear();
         rawTreeChildrenByParent_.clear();
         rawTreeMaterializedPaths_.clear();
+        rawTreeItemsByPath_.clear();
         rawTree_->DeleteAllItems();
 
-        const std::string filter = rawFilter_ ? lowerAscii(wxui::toStd(rawFilter_->GetValue())) : std::string{};
+        const std::string filter = lowerAscii(activeDocument().rawFilterTerm);
         if (model().loaded()) {
             for (const auto& row : model().rows()) {
                 if (!filter.empty()) {
@@ -3266,7 +3420,15 @@ private:
         }
 
         materializeRawTreeChildren(root, std::string{});
-        rawTree_->Expand(root);
+        const neotree::TreeViewState& state = activeDocument().rawTreeState;
+        if (state.initialized) {
+            neotree::restoreTreeViewState(
+                *rawTree_, state,
+                [this](const std::string& key) { return ensureRawTreeItemForKey(key); });
+        } else {
+            rawTree_->Expand(root);
+        }
+        rawTreeRenderedDocumentPage_ = activeDocument().tabPage;
     }
 
     void onRawTreeExpanding(wxTreeEvent& event) {
@@ -3520,6 +3682,8 @@ private:
     wxNotebook* inspectorBook_ = nullptr;
     wxTextCtrl* findText_ = nullptr;
     std::map<DlgNodeRef, wxTreeItemId> canonicalTreeItems_;
+    std::unordered_map<std::string, wxTreeItemId> conversationTreeItemsByKey_;
+    wxWindow* conversationTreeRenderedDocumentPage_ = nullptr;
     std::string lastSearchTerm_;
     std::vector<DlgNodeRef> searchResults_;
     std::size_t searchIndex_ = 0;
@@ -3685,8 +3849,10 @@ private:
     wxTreeCtrl* rawTree_ = nullptr;
     std::vector<GffFieldRow> rawRows_;
     std::vector<wxTreeItemId> rawTreeRowItems_;
+    std::unordered_map<std::string, wxTreeItemId> rawTreeItemsByPath_;
     std::unordered_map<std::string, std::vector<std::size_t>> rawTreeChildrenByParent_;
     std::set<std::string> rawTreeMaterializedPaths_;
+    wxWindow* rawTreeRenderedDocumentPage_ = nullptr;
 
     neoview::FontScaleWheelFilter fontScaleWheelFilter_;
     double fontScale_ = neoview::kDefaultFontScale;
