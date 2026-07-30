@@ -4,6 +4,7 @@
 #include "neodlg/model/DlgSemanticOptions.hpp"
 #include "neodlg/patcher/DlgPatcher.hpp"
 #include "neodlg_icon.xpm"
+#include "NeoDlgDialogs.hpp"
 
 #include "NeoDocumentTabs.hpp"
 #include "NeoGameDirectoryMenu.hpp"
@@ -26,7 +27,6 @@
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
 #include <wx/splitter.h>
-#include <wx/statline.h>
 #include <wx/treectrl.h>
 #include <wx/wupdlock.h>
 #include <wx/wrapsizer.h>
@@ -307,6 +307,27 @@ void populateJadeParticipantCombo(wxComboBox* control,
     } else {
         control->SetSelection(existing);
     }
+}
+
+std::string singleLineText(std::string text) {
+    for (char& ch : text) {
+        if (ch == '\r' || ch == '\n' || ch == '\t') ch = ' ';
+    }
+
+    std::string result;
+    result.reserve(text.size());
+    bool previousSpace = false;
+    for (unsigned char ch : text) {
+        const bool isSpace = std::isspace(ch) != 0;
+        if (isSpace) {
+            if (!result.empty() && !previousSpace) result.push_back(' ');
+        } else {
+            result.push_back(static_cast<char>(ch));
+        }
+        previousSpace = isSpace;
+    }
+    if (!result.empty() && result.back() == ' ') result.pop_back();
+    return result;
 }
 
 class AnimationEditDialog final : public wxDialog {
@@ -1986,23 +2007,54 @@ private:
 
     std::optional<DlgNodeRef> chooseExistingNode(DlgNodeKind kind, const wxString& title) {
         DlgDocument document = dialogue();
-        wxArrayString choices;
-        std::vector<DlgNodeRef> refs;
+        std::vector<neodlggui::ExistingNodeChoice> choices;
+        choices.reserve(document.nodeCount(kind));
+
         for (std::size_t i = 0; i < document.nodeCount(kind); ++i) {
-            DlgNodeRef ref{kind, i};
-            refs.push_back(ref);
-            choices.Add(wxui::toWx(document.nodeLabel(ref, 120)));
+            const DlgNodeRef ref{kind, i};
+            const DlgTextValue textValue = document.text(ref);
+
+            std::string visible = !textValue.localText.empty()
+                ? textValue.localText
+                : textValue.resolvedText;
+            if (visible.empty() && textValue.strref != 0xFFFFFFFFu) {
+                visible = "StrRef " + std::to_string(textValue.strref);
+            }
+            if (visible.empty()) visible = "(no text)";
+            visible = singleLineText(std::move(visible));
+
+            const std::string nodeId = document.nodeIdText(ref);
+            const std::string speaker = document.speaker(ref);
+            std::string search = std::to_string(i) + " " + nodeId + " " + speaker + " " +
+                                 textValue.localText + " " + textValue.resolvedText;
+            if (textValue.strref != 0xFFFFFFFFu) {
+                search += " StrRef " + std::to_string(textValue.strref);
+            }
+
+            wxString visiblePreview = wxui::toWx(visible);
+            constexpr std::size_t kNodePreviewCharacters = 360;
+            if (visiblePreview.length() > kNodePreviewCharacters) {
+                visiblePreview = visiblePreview.Left(kNodePreviewCharacters - 3) + "...";
+            }
+
+            choices.push_back({
+                ref,
+                wxui::toWx(std::to_string(i)),
+                wxui::toWx(nodeId),
+                wxui::toWx(speaker),
+                std::move(visiblePreview),
+                wxui::toWx(singleLineText(std::move(search))).Lower(),
+            });
         }
-        if (refs.empty()) {
+
+        if (choices.empty()) {
             wxui::showMessage(this, "Link Existing Node", "There are no existing nodes of the required type.");
             return std::nullopt;
         }
-        wxSingleChoiceDialog dialog(this, "Choose the node to link:", title, choices);
-        wxui::applyTheme(&dialog, darkMode_);
+
+        neodlggui::ExistingNodeDialog dialog(this, title, std::move(choices), darkMode_);
         if (dialog.ShowModal() != wxID_OK) return std::nullopt;
-        const int selection = dialog.GetSelection();
-        if (selection < 0 || static_cast<std::size_t>(selection) >= refs.size()) return std::nullopt;
-        return refs[static_cast<std::size_t>(selection)];
+        return dialog.selectedNode();
     }
 
     void onLinkExisting(wxCommandEvent&) {
@@ -2526,22 +2578,10 @@ private:
     void onExportPatcherPackage(wxCommandEvent&) {
         if (!model().loaded() || model().gff().isGff4()) return;
         try {
-            wxArrayString modeChoices;
-            modeChoices.Add("Dynamic merge instructions (recommended)");
-            modeChoices.Add("Complete modified DLG replacement");
-            wxSingleChoiceDialog modeDialog(
-                this,
-                "Choose how the package should install this dialogue.\n\n"
-                "Dynamic merge appends new Entry and Reply nodes at installation time and connects them with ListIndex and 2DAMEMORY tokens. It is merge-friendly, but requires original TSLPatcher 1.2.10b1 or a HoloPatcher release that supports the same dynamic GFF syntax. Changes such as deletion or root-list reordering are rejected.\n\n"
-                "Complete replacement installs the entire modified DLG. It does not use dynamic tokens and works with patchers that cannot process TypeId=ListIndex, but it can conflict with another mod that replaces the same DLG.",
-                "TSLPatcher Export Mode",
-                modeChoices);
-            modeDialog.SetSelection(0);
+            neodlggui::PatcherExportModeDialog modeDialog(this, darkMode_);
             if (modeDialog.ShowModal() != wxID_OK) return;
 
-            const auto patchMode = modeDialog.GetSelection() == 0
-                ? neodlg::patcher::DlgPatchMode::DynamicMerge
-                : neodlg::patcher::DlgPatchMode::CompleteReplacement;
+            const auto patchMode = modeDialog.selectedMode();
 
             std::optional<std::filesystem::path> originalPath;
             if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
