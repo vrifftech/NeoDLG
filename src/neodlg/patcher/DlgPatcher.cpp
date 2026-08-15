@@ -290,7 +290,6 @@ PatchProject makeWholeFileReplacement(GffFile& modified,
                                       const std::string& patchFilename,
                                       const std::string& destination) {
     PatchProject project;
-    project.add("Settings", "FileExists", "1");
     project.add("Settings", "InstallerMode", "1");
 
     const std::string installSection = "NeoDLGFiles";

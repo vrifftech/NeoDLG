@@ -9,6 +9,7 @@
 #include "NeoDocumentTabs.hpp"
 #include "NeoGameDirectoryMenu.hpp"
 #include "NeoSettings.hpp"
+#include "NeoPatcherExport.hpp"
 #include "NeoTreeState.hpp"
 #include "NeoViewState.hpp"
 #include "NeoWxUi.hpp"
@@ -56,6 +57,9 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
+              "NeoDLG requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
 
 namespace {
 
@@ -1071,7 +1075,7 @@ private:
         exportMenu->Append(ID_ExportXml, "Export XML...");
         exportMenu->Append(ID_ExportJson, "Export JSON...");
         exportMenu->AppendSeparator();
-        exportMenu->Append(ID_ExportPatcher, "Export TSL/HoloPatcher Package...");
+        exportMenu->Append(ID_ExportPatcher, "Export TSL/HoloPatcher Instructions...");
 
         auto* view = new wxMenu;
         conversationViewItem_ = view->AppendRadioItem(ID_ViewConversation, "Conversation Editor");
@@ -2707,8 +2711,10 @@ private:
                 }
             }
 
-            const auto outputDir = wxui::chooseDirectory(this, "Choose tslpatchdata package folder");
-            if (!outputDir) return;
+            const auto output = wxui::choosePatcherOutput(this);
+            if (!output) return;
+            const bool writeToIni = output->writesToIni();
+
             neotsl::PatchProject project;
             if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
                 GffModel original;
@@ -2718,8 +2724,8 @@ private:
                     model().gff(),
                     *patchName,
                     patchMode,
-                    true,
-                    *originalPath,
+                    writeToIni,
+                    writeToIni ? *originalPath : std::filesystem::path{},
                     destination);
             } else {
                 project = neodlg::patcher::makeCompleteDlgReplacement(
@@ -2741,7 +2747,21 @@ private:
             }
 
             neotsl::throwIfUnsupported(project);
-            neotsl::writePackage(project, *outputDir, true);
+
+            if (!writeToIni) {
+                std::vector<std::string> companionFiles;
+                if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
+                    companionFiles.push_back(*patchName);
+                }
+                wxui::showIniFragmentDialog(
+                    this,
+                    "DLG Patcher INI Fragment",
+                    project,
+                    companionFiles);
+                return;
+            }
+
+            const auto report = neotsl::writePackageToIni(project, output->iniPath, true);
 
             const std::string detail = patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge
                 ? "The package uses TSLPatcher's dynamic ListIndex and 2DAMEMORY workflow. New Entry and Reply nodes receive their actual indexes during installation, and generated link fields are updated to those indexes automatically."
@@ -2749,8 +2769,10 @@ private:
             wxui::showMessage(
                 this,
                 "TSL/HoloPatcher Package",
-                "Wrote changes.ini, info.rtf, and the required DLG file to:\n" +
-                    neosettings::pathToUtf8(*outputDir) + "\n\n" + detail);
+                std::string(report.mergedExisting ? "Merged the generated DLG instructions into:\n"
+                                                  : "Created the installer INI:\n") +
+                    neosettings::pathToUtf8(report.iniPath) +
+                    "\n\nRequired package files were staged beside the selected INI.\n\n" + detail);
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
 

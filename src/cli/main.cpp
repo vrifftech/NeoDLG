@@ -29,8 +29,8 @@ void usage(std::ostream& out) {
         << "  neodlg-cli search <dlg> <term> [--tlk dialog.tlk]\n"
         << "  neodlg-cli export <dlg> <xml|json> <output>\n"
         << "  neodlg-cli import <input-dlg> <output-dlg> <xml|json> <input-document>\n"
-        << "  neodlg-cli diff-tslpatcher <original-dlg> <modified-input> <output-dir|fragment.ini> [--modified-format xml|json|dlg|gff|kotor|native|auto] [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
-        << "  neodlg-cli diff-tslpatcher-import <original-dlg> <modified-input> <xml|json|dlg|gff|kotor|native|auto> <output-dir|fragment.ini> [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
+        << "  neodlg-cli diff-tslpatcher <original-dlg> <modified-input> <output-dir|fragment.ini> [--modified-format xml|json|dlg|gff|kotor|native|auto] [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--ini installer.ini] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
+        << "  neodlg-cli diff-tslpatcher-import <original-dlg> <modified-input> <xml|json|dlg|gff|kotor|native|auto> <output-dir|fragment.ini> [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--ini installer.ini] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
         << "  neodlg-cli roundtrip <input-dlg> <output-dlg>\n"
         << "  neodlg-cli new <output-dlg> [file-type]\n"
         << "  neodlg-cli set-value <input-dlg> <output-dlg> <path> <value>\n"
@@ -58,6 +58,7 @@ struct PatchOutputOptions {
     std::string patchFilename;
     std::string modifiedFormat = "auto";
     std::string destination = "override";
+    std::filesystem::path iniFilename = "changes.ini";
 };
 
 neodlg::patcher::DlgPatchMode parseDlgPatchMode(std::string value) {
@@ -86,6 +87,9 @@ PatchOutputOptions parsePatchOutputOptions(int argc, char** argv, int begin, con
         else if (arg == "--filename") {
             if (i + 1 >= argc) throw std::runtime_error("--filename requires a value.");
             options.patchFilename = argv[++i];
+        } else if (arg == "--ini") {
+            if (i + 1 >= argc) throw std::runtime_error("--ini requires a filename.");
+            options.iniFilename = argv[++i];
         } else if (arg == "--allow-unsupported") options.allowUnsupported = true;
         else if (arg == "--patch-mode" || arg == "--mode") {
             if (i + 1 >= argc) throw std::runtime_error(arg + " requires dynamic or replace.");
@@ -107,8 +111,14 @@ PatchOutputOptions parsePatchOutputOptions(int argc, char** argv, int begin, con
 void writePatchOutput(const neotsl::PatchProject& project, const std::filesystem::path& output, const PatchOutputOptions& options) {
     if (!options.allowUnsupported) neotsl::throwIfUnsupported(project);
     else neotsl::printReport(project);
-    if (options.package) neotsl::writePackage(project, output, true);
-    else neotsl::writeFragment(project, output);
+    if (options.package) {
+        const std::filesystem::path iniPath = options.iniFilename.is_absolute()
+            ? options.iniFilename
+            : output / options.iniFilename;
+        neotsl::writePackageToIni(project, iniPath, true);
+    } else {
+        neotsl::writeFragment(project, output);
+    }
 }
 
 std::string normalizeGffTypeForCli(std::string value) {
