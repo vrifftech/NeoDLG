@@ -1,5 +1,6 @@
 #include "core/AppModel.hpp"
 #include "core/GffJson.hpp"
+#include "core/Version.hpp"
 #include "neodlg/model/DlgDocument.hpp"
 #include "neodlg/model/DlgSemanticOptions.hpp"
 #include "neodlg/patcher/DlgPatcher.hpp"
@@ -1141,7 +1142,7 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { Close(); }, wxID_EXIT);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) {
             wxui::showMessage(this, "About NeoDLG",
-                              "NeoDLG v2.0.0\nPurpose-built BioWare conversation editor\n\n"
+                              std::string("NeoDLG v") + kVersion + "\nPurpose-built BioWare conversation editor\n\n"
                               "Conversation graph editing, link conditions, TLK text, scripts, animations, validation, and structured GFF access.");
         }, wxID_ABOUT);
     }
@@ -1895,8 +1896,24 @@ private:
     }
 
     void chooseAndOpenDlg(const std::filesystem::path& initialDirectory = {}) {
+#if defined(__EMSCRIPTEN__)
+        wxui::requestOpenFile(
+            this,
+            "Open DLG",
+            kDlgWildcard,
+            initialDirectory,
+            [this](std::optional<std::filesystem::path> path) {
+                if (!path || IsBeingDeleted()) return;
+                try {
+                    openModelPath(*path);
+                } catch (const std::exception& ex) {
+                    wxui::showError(this, ex);
+                }
+            });
+#else
         const auto path = wxui::chooseOpenFile(this, "Open DLG", kDlgWildcard, initialDirectory);
         if (path) openModelPath(*path);
+#endif
     }
 
     bool openModelPath(const std::filesystem::path& path) {
@@ -1992,14 +2009,40 @@ private:
         catch (const std::exception&) { settings_.clearLastTlkPath(); }
     }
 
+    void loadTlkFromPath(const std::filesystem::path& chosen) {
+        try {
+            model().loadTlk(chosen);
+            settings_.setLastTlkPath(chosen);
+            refreshAll();
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+    }
+
     void onOpenTlk(wxCommandEvent&) {
+#if defined(__EMSCRIPTEN__)
+        if (!hasActiveDocument()) return;
+        wxWindow* const targetPage = activeDocument().tabPage;
+        wxui::requestOpenFile(
+            this,
+            "Open TLK",
+            kTlkWildcard,
+            [this, targetPage](std::optional<std::filesystem::path> chosen) {
+                if (!chosen || IsBeingDeleted()) return;
+                if (!hasActiveDocument() || activeDocument().tabPage != targetPage) {
+                    wxui::showMessage(
+                        this,
+                        "TLK Load Cancelled",
+                        "The active document changed while the TLK picker was open. Select the TLK again from the intended tab.");
+                    return;
+                }
+                loadTlkFromPath(*chosen);
+            });
+#else
         const auto chosen = wxui::chooseOpenFile(this, "Open TLK", kTlkWildcard);
         if (!chosen) return;
-        try {
-            model().loadTlk(*chosen);
-            settings_.setLastTlkPath(*chosen);
-            refreshAll();
-        } catch (const std::exception& ex) { wxui::showError(this, ex); }
+        loadTlkFromPath(*chosen);
+#endif
     }
 
     void onClearTlk(wxCommandEvent&) {
@@ -2635,16 +2678,42 @@ private:
         animationList_->SetItemState(target, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
     }
 
-    void onImport(bool json) {
-        const auto chosen = wxui::chooseOpenFile(this, json ? "Import JSON" : "Import XML",
-                                                  json ? kJsonWildcard : kXmlWildcard);
-        if (!chosen) return;
+    void importFromPath(bool json, const std::filesystem::path& chosen) {
         mutate(json ? "Import JSON" : "Import XML", [this, chosen, json]() {
-            const std::string source = readTextFile(*chosen);
+            const std::string source = readTextFile(chosen);
             model().importXml(json ? gffJsonToXml(source) : source);
             activeDocument().selectedNode.reset();
             activeDocument().selectedLink.reset();
         });
+    }
+
+    void onImport(bool json) {
+#if defined(__EMSCRIPTEN__)
+        if (!hasActiveDocument()) return;
+        wxWindow* const targetPage = activeDocument().tabPage;
+        wxui::requestOpenFile(
+            this,
+            json ? "Import JSON" : "Import XML",
+            json ? kJsonWildcard : kXmlWildcard,
+            [this, targetPage, json](std::optional<std::filesystem::path> chosen) {
+                if (!chosen || IsBeingDeleted()) return;
+                if (!hasActiveDocument() || activeDocument().tabPage != targetPage) {
+                    wxui::showMessage(
+                        this,
+                        "Import Cancelled",
+                        "The active document changed while the import picker was open. Start the import again from the intended tab.");
+                    return;
+                }
+                importFromPath(json, *chosen);
+            });
+#else
+        const auto chosen = wxui::chooseOpenFile(
+            this,
+            json ? "Import JSON" : "Import XML",
+            json ? kJsonWildcard : kXmlWildcard);
+        if (!chosen) return;
+        importFromPath(json, *chosen);
+#endif
     }
 
     void onExport(bool json) {
@@ -2663,26 +2732,18 @@ private:
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
 
-    void onExportPatcherPackage(wxCommandEvent&) {
-        if (!model().loaded() || model().gff().isGff4()) return;
+    void continueExportPatcherPackage(
+        neodlg::patcher::DlgPatchMode patchMode,
+        std::optional<std::filesystem::path> originalPath) {
         try {
-            neodlggui::PatcherExportModeDialog modeDialog(this, darkMode_);
-            if (modeDialog.ShowModal() != wxID_OK) return;
-
-            const auto patchMode = modeDialog.selectedMode();
-
-            std::optional<std::filesystem::path> originalPath;
-            if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
-                originalPath = wxui::chooseOpenFile(
-                    this,
-                    "Select clean/unmodified DLG",
-                    kDlgWildcard);
-                if (!originalPath) return;
-            }
-
-            std::string defaultName = model().filename().empty() ? "modified.dlg" : neosettings::pathToUtf8(model().filename().filename());
-            const auto patchName = wxui::promptText(this, "Patch Target Filename",
-                                                     "DLG filename to patch in the user's install:", defaultName);
+            std::string defaultName = model().filename().empty()
+                ? "modified.dlg"
+                : neosettings::pathToUtf8(model().filename().filename());
+            const auto patchName = wxui::promptText(
+                this,
+                "Patch Target Filename",
+                "DLG filename to patch in the user's install:",
+                defaultName);
             if (!patchName || patchName->empty()) return;
 
             wxArrayString destinationChoices;
@@ -2717,6 +2778,9 @@ private:
 
             neotsl::PatchProject project;
             if (patchMode == neodlg::patcher::DlgPatchMode::DynamicMerge) {
+                if (!originalPath) {
+                    throw std::runtime_error("A clean original DLG is required for dynamic merge mode.");
+                }
                 GffModel original;
                 original.load(*originalPath);
                 project = neodlg::patcher::diffDlgPatcher(
@@ -2773,7 +2837,51 @@ private:
                                                   : "Created the installer INI:\n") +
                     neosettings::pathToUtf8(report.iniPath) +
                     "\n\nRequired package files were staged beside the selected INI.\n\n" + detail);
-        } catch (const std::exception& ex) { wxui::showError(this, ex); }
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
+    }
+
+    void onExportPatcherPackage(wxCommandEvent&) {
+        if (!model().loaded() || model().gff().isGff4()) return;
+        try {
+            neodlggui::PatcherExportModeDialog modeDialog(this, darkMode_);
+            if (modeDialog.ShowModal() != wxID_OK) return;
+
+            const auto patchMode = modeDialog.selectedMode();
+            if (patchMode != neodlg::patcher::DlgPatchMode::DynamicMerge) {
+                continueExportPatcherPackage(patchMode, std::nullopt);
+                return;
+            }
+
+#if defined(__EMSCRIPTEN__)
+            wxWindow* const targetPage = activeDocument().tabPage;
+            wxui::requestOpenFile(
+                this,
+                "Select clean/unmodified DLG",
+                kDlgWildcard,
+                [this, targetPage, patchMode](std::optional<std::filesystem::path> originalPath) {
+                    if (!originalPath || IsBeingDeleted()) return;
+                    if (!hasActiveDocument() || activeDocument().tabPage != targetPage) {
+                        wxui::showMessage(
+                            this,
+                            "Patcher Export Cancelled",
+                            "The active document changed while the baseline picker was open. Start the export again from the intended tab.");
+                        return;
+                    }
+                    continueExportPatcherPackage(patchMode, std::move(originalPath));
+                });
+#else
+            const auto originalPath = wxui::chooseOpenFile(
+                this,
+                "Select clean/unmodified DLG",
+                kDlgWildcard);
+            if (!originalPath) return;
+            continueExportPatcherPackage(patchMode, originalPath);
+#endif
+        } catch (const std::exception& ex) {
+            wxui::showError(this, ex);
+        }
     }
 
     void setWorkspacePage(int page, bool refresh = true) {

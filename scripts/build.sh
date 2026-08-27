@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PROJECT_NAME="$(basename "$ROOT_DIR")"
-PROJECT_PREFIX="$(printf '%s' "$PROJECT_NAME" | tr -cd '[:alnum:]' | tr '[:lower:]' '[:upper:]')"
+PROJECT_NAME="NeoDLG"
+PROJECT_PREFIX="NEODLG"
 CMAKE_BIN="${CMAKE:-cmake}"
 BUILD_DIR="$ROOT_DIR/build"
 BUILD_TYPE="Release"

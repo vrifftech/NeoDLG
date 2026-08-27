@@ -1,6 +1,7 @@
 #include "core/AppModel.hpp"
 #include "TabularData.hpp"
 #include "core/GffJson.hpp"
+#include "core/Version.hpp"
 #include "TslPatcher.hpp"
 #include "DlgPatcher.hpp"
 
@@ -21,7 +22,7 @@ using neodlg::GffModel;
 namespace {
 
 void usage(std::ostream& out) {
-    out << "NeoDLG DLG conversation editor CLI\n"
+    out << "NeoDLG " << neodlg::kVersion << " DLG conversation editor CLI\n"
         << "\n"
         << "Usage:\n"
         << "  neodlg-cli info <dlg> [--tlk dialog.tlk]\n"
@@ -308,6 +309,10 @@ int main(int argc, char** argv) {
         const std::string command = argv[1];
         if (command == "help" || command == "--help" || command == "-h") {
             usage(std::cout);
+            return 0;
+        }
+        if (command == "version" || command == "--version" || command == "-v") {
+            std::cout << "NeoDLG " << neodlg::kVersion << '\n';
             return 0;
         }
 

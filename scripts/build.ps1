@@ -21,8 +21,8 @@ param(
 $ErrorActionPreference = 'Stop'
 
 $RootDir = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
-$ProjectName = Split-Path -Leaf $RootDir
-$ProjectPrefix = (($ProjectName -replace '[^A-Za-z0-9]', '').ToUpperInvariant())
+$ProjectName = 'NeoDLG'
+$ProjectPrefix = 'NEODLG'
 $CMakeLists = Join-Path $RootDir 'CMakeLists.txt'
 
 if ([string]::IsNullOrWhiteSpace($BuildDir)) {

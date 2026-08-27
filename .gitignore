@@ -43,3 +43,13 @@ install_manifest.txt
 .DS_Store
 Thumbs.db
 Desktop.ini
+
+# macOS native build and package outputs
+/build-macos*/
+/stage-macos*/
+/dist/
+
+# WebAssembly and GitHub Pages outputs
+/build-wasm*/
+/dist-wasm/
+/.neo-wasm-deps/

@@ -1,11 +1,10 @@
 cmake_minimum_required(VERSION 3.16)
- 
+
 if(POLICY CMP0091)
     cmake_policy(SET CMP0091 NEW)
 endif()
 set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>" CACHE STRING "MSVC runtime library" FORCE)
 
-project(NeoDLG VERSION 2.0.0 DESCRIPTION "Purpose-built BioWare conversation editor" LANGUAGES CXX)
 set(NEOSHARED_ROOT "" CACHE PATH
     "Path to the neoshared source repository; defaults to ../neoshared")
 
@@ -31,6 +30,14 @@ if(NOT EXISTS "${NEOSHARED_ROOT}/CMakeLists.txt")
         "Clone the neoshared repository beside this repository, or configure "
         "with -DNEOSHARED_ROOT=/path/to/neoshared.")
 endif()
+
+include("${NEOSHARED_ROOT}/cmake/NeoVersion.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoMacOSBundle.cmake")
+include("${NEOSHARED_ROOT}/cmake/NeoWasm.cmake")
+neo_read_version_header(NEODLG_VERSION
+    "${CMAKE_CURRENT_LIST_DIR}/src/core/Version.hpp"
+    NEODLG_VERSION_STRING)
+project(NeoDLG VERSION ${NEODLG_VERSION} DESCRIPTION "Purpose-built BioWare conversation editor" LANGUAGES CXX)
 
 if(MSVC)
     foreach(_neo_runtime_flag_var IN ITEMS
@@ -174,11 +181,12 @@ if(NEODLG_BUILD_WX_GUI)
     if(wxWidgets_FOUND OR TARGET wx::core OR TARGET wxWidgets::wxWidgets)
         set(NEODLG_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
-            list(APPEND NEODLG_WX_SOURCES resources/neodlg.rc)
-        elseif(APPLE)
-            list(APPEND NEODLG_WX_SOURCES resources/neodlg.icns)
-            set_source_files_properties(resources/neodlg.icns PROPERTIES
-                MACOSX_PACKAGE_LOCATION Resources)
+            neo_configure_windows_version_resource(
+                NEODLG_WX_SOURCES_RC
+                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.rc.in"
+                "neodlg.rc"
+                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.ico")
+            list(APPEND NEODLG_WX_SOURCES "${NEODLG_WX_SOURCES_RC}")
         endif()
 
         if(WIN32)
@@ -188,6 +196,16 @@ if(NEODLG_BUILD_WX_GUI)
         else()
             add_executable(NeoDLG ${NEODLG_WX_SOURCES})
         endif()
+        neo_configure_macos_bundle(NeoDLG
+            NAME "NeoDLG"
+            IDENTIFIER "com.vrifftech.neodlg"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.icns"
+        )
+        neo_configure_wasm_target(NeoDLG
+            NAME "NeoDLG"
+            SLUG "neodlg"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.svg"
+        )
         target_link_libraries(NeoDLG PRIVATE neodlg_core)
         target_include_directories(NeoDLG PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
         target_link_libraries(NeoDLG PRIVATE neoshared::wx)
@@ -197,13 +215,6 @@ if(NEODLG_BUILD_WX_GUI)
             target_compile_options(NeoDLG PRIVATE /W4 /permissive-)
         else()
             target_compile_options(NeoDLG PRIVATE -Wall -Wextra -Wpedantic)
-        endif()
-        if(APPLE)
-            set_target_properties(NeoDLG PROPERTIES
-                MACOSX_BUNDLE_ICON_FILE neodlg.icns
-                MACOSX_BUNDLE_BUNDLE_NAME NeoDLG
-                MACOSX_BUNDLE_GUI_IDENTIFIER com.vrifftech.neodlg
-            )
         endif()
 
         install(TARGETS NeoDLG
