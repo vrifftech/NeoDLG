@@ -111,7 +111,7 @@ if [[ "$NO_VCPKG" == 0 && -n "$VCPKG_ROOT_VALUE" && -f "$VCPKG_ROOT_VALUE/script
   CONFIG_ARGS+=("-DCMAKE_TOOLCHAIN_FILE=$VCPKG_ROOT_VALUE/scripts/buildsystems/vcpkg.cmake")
   [[ -z "$VCPKG_TRIPLET" ]] || CONFIG_ARGS+=("-DVCPKG_TARGET_TRIPLET=$VCPKG_TRIPLET")
 fi
-CONFIG_ARGS+=("${EXTRA[@]}")
+CONFIG_ARGS+=("${EXTRA[@]+"${EXTRA[@]}"}")
 
 printf 'Configuring %s in %s\n' "$PROJECT_NAME" "$BUILD_DIR"
 "$CMAKE_BIN" "${CONFIG_ARGS[@]}"

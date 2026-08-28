@@ -27,4 +27,4 @@ bash "$NEOSHARED_ROOT_VALUE/scripts/build-wasm-app.sh" \
   --option-prefix "NEODLG" \
   --cli-option "NEODLG_BUILD_CLI" \
   --icon "resources/neodlg.svg" \
-  "${forward[@]}"
+  "${forward[@]+"${forward[@]}"}"
