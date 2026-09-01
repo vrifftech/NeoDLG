@@ -61,6 +61,10 @@
 
 static_assert(wxui::kPatcherExportUiApiVersion >= 3u,
               "NeoDLG requires the exact-INI/Fragment patch-export UI from the current neoshared checkout.");
+#if defined(__EMSCRIPTEN__)
+static_assert(neobrowser::kBrowserFileApiVersion >= 10u,
+              "NeoDLG requires owned browser imports and transactional write-back from the current neoshared checkout.");
+#endif
 
 namespace {
 
@@ -979,9 +983,14 @@ private:
 
     struct DocumentTab {
         std::unique_ptr<GffModel> model = std::make_unique<GffModel>();
+        std::filesystem::path logicalFilename;
         std::string untitledName = "Untitled DLG";
         std::string tlkAutoLoadWarning;
         wxWindow* tabPage = nullptr;
+        bool saveInProgress = false;
+#if defined(__EMSCRIPTEN__)
+        neobrowser::BrowserImportLease sourceImport;
+#endif
         int workspacePage = 0;
         std::optional<DlgNodeRef> selectedNode;
         std::optional<DlgLinkRef> selectedLink;
@@ -1003,10 +1012,17 @@ private:
     DlgDocument dialogue() { return DlgDocument(model()); }
     DlgDocument dialogue() const { return DlgDocument(model()); }
 
-    bool tabDirty(const DocumentTab& tab) const { return tab.model && tab.model->dirty(); }
+    std::filesystem::path documentFilename(const DocumentTab& tab) const {
+        if (!tab.logicalFilename.empty()) return tab.logicalFilename;
+        return tab.model ? tab.model->filename() : std::filesystem::path{};
+    }
+
+    bool tabDirty(const DocumentTab& tab) const {
+        return tab.saveInProgress || (tab.model && tab.model->dirty());
+    }
 
     std::string tabDisplayName(const DocumentTab& tab) const {
-        return neotabs::displayNameForPath(tab.model ? tab.model->filename() : std::filesystem::path{}, tab.untitledName);
+        return neotabs::displayNameForPath(documentFilename(tab), tab.untitledName);
     }
 
     void setApplicationIcon() {
@@ -1827,6 +1843,37 @@ private:
         else if (!activeTabReusable()) createDocumentTab(true);
     }
 
+#if defined(__EMSCRIPTEN__)
+    using BrowserImportCallback = std::function<void(neobrowser::BrowserImportLease)>;
+
+    void requestBrowserImport(const std::string& title,
+                              const std::string& accept,
+                              bool multiple,
+                              BrowserImportCallback callback) {
+        wxWeakRef<NeoDLGFrame> weakSelf(this);
+        neobrowser::requestOpenFilesOwned(
+            title, accept, multiple,
+            [weakSelf, callback = std::move(callback)](
+                neobrowser::OwnedOpenFilesResult result) mutable {
+                if (!weakSelf || weakSelf->IsBeingDeleted()) return;
+                auto* const frame = weakSelf.get();
+                if (!result.error.empty()) {
+                    wxMessageBox(wxui::toWx(result.error), "File Open Error",
+                                 wxOK | wxICON_ERROR, frame);
+                    return;
+                }
+                if (result.cancelled()) return;
+                callback(std::move(result.import));
+            });
+    }
+
+    static bool importOwnsPath(const neobrowser::BrowserImportLease& import,
+                               const std::filesystem::path& path) {
+        return std::find(import.paths().begin(), import.paths().end(), path) !=
+               import.paths().end();
+    }
+#endif
+
     void selectDocumentTab(std::size_t index) {
         if (index >= documents_.size()) return;
         if (hasActiveDocument() && index != activeDocumentIndex_) captureRenderedTreeStates();
@@ -1840,7 +1887,13 @@ private:
     }
 
     bool confirmCloseDocument(std::size_t index) {
-        if (index >= documents_.size() || !tabDirty(documents_[index])) return true;
+        if (index >= documents_.size()) return true;
+        if (documents_[index].saveInProgress) {
+            wxui::showMessage(this, "Save in progress",
+                              "Finish the browser save transaction before closing this tab.");
+            return false;
+        }
+        if (!tabDirty(documents_[index])) return true;
         return wxui::confirm(this, "Close tab", neotabs::closePromptText(tabDisplayName(documents_[index])));
     }
 
@@ -1866,10 +1919,14 @@ private:
         return true;
     }
 
+    void updateDocumentTabTitle(DocumentTab& document) {
+        neotabs::setTabLabel(documentTabs_, document.tabPage,
+                             tabDisplayName(document), tabDirty(document));
+    }
+
     void updateTabTitle() {
         if (!hasActiveDocument()) return;
-        neotabs::setTabLabel(documentTabs_, activeDocument().tabPage,
-                             tabDisplayName(activeDocument()), tabDirty(activeDocument()));
+        updateDocumentTabTitle(activeDocument());
     }
 
     void newDocument(DlgFlavor flavor) {
@@ -1877,6 +1934,10 @@ private:
             if (!activeTabReusable()) createDocumentTab(true);
             DlgDocument document(model());
             document.create(flavor);
+            activeDocument().logicalFilename.clear();
+#if defined(__EMSCRIPTEN__)
+            activeDocument().sourceImport.reset();
+#endif
             activeDocument().untitledName = "Untitled " + flavorName(flavor) + " DLG";
             activeDocument().undo.clear();
             activeDocument().redo.clear();
@@ -1897,15 +1958,14 @@ private:
 
     void chooseAndOpenDlg(const std::filesystem::path& initialDirectory = {}) {
 #if defined(__EMSCRIPTEN__)
-        wxui::requestOpenFile(
-            this,
-            "Open DLG",
-            kDlgWildcard,
-            initialDirectory,
-            [this](std::optional<std::filesystem::path> path) {
-                if (!path || IsBeingDeleted()) return;
+        (void)initialDirectory;
+        requestBrowserImport(
+            "Open DLG", ".dlg", false,
+            [this](neobrowser::BrowserImportLease import) {
+                if (import.empty() || IsBeingDeleted()) return;
                 try {
-                    openModelPath(*path);
+                    const std::filesystem::path selectedPath = import.paths().front();
+                    openModelPath(selectedPath, std::move(import));
                 } catch (const std::exception& ex) {
                     wxui::showError(this, ex);
                 }
@@ -1927,6 +1987,10 @@ private:
         }
 
         activeDocument().model = std::move(candidate);
+        activeDocument().logicalFilename = path;
+#if defined(__EMSCRIPTEN__)
+        activeDocument().sourceImport.reset();
+#endif
         activeDocument().undo.clear();
         activeDocument().redo.clear();
         activeDocument().selectedNode.reset();
@@ -1945,6 +2009,15 @@ private:
         refreshAll();
         return true;
     }
+
+#if defined(__EMSCRIPTEN__)
+    bool openModelPath(const std::filesystem::path& path,
+                       neobrowser::BrowserImportLease import) {
+        if (!openModelPath(path)) return false;
+        activeDocument().sourceImport = std::move(import);
+        return true;
+    }
+#endif
 
     void onOpen(wxCommandEvent&) {
         try { chooseAndOpenDlg(); } catch (const std::exception& ex) { wxui::showError(this, ex); }
@@ -1968,20 +2041,84 @@ private:
 
     bool save(bool saveAs) {
         if (!hasActiveDocument() || !model().loaded()) return false;
+        if (activeDocument().saveInProgress || browserSaveActive_) return false;
         try {
-            std::filesystem::path target = model().filename();
+            DocumentTab& document = activeDocument();
+            std::filesystem::path target = documentFilename(document);
             if (saveAs || target.empty()) {
                 std::string name = target.empty() ? "new.dlg" : neosettings::pathToUtf8(target.filename());
                 const auto chosen = wxui::chooseSaveFile(this, "Save DLG", kDlgWildcard, name);
                 if (!chosen) return false;
                 target = ensureDlgExtension(*chosen);
             }
-            model().save(target);
+
+            const bool wasDirty = document.model->dirty();
+            document.model->save(target);
+
+#if defined(__EMSCRIPTEN__)
+            document.saveInProgress = true;
+            browserSaveActive_ = true;
+            updateDocumentTabTitle(document);
+            refreshHeader();
+            Enable(false);
+
+            wxWeakRef<NeoDLGFrame> weakSelf(this);
+            wxWindow* const targetPage = document.tabPage;
+            neobrowser::requestDownloadFile(
+                target,
+                target.filename().string(),
+                [weakSelf, targetPage, target, wasDirty](neobrowser::DownloadResult result) {
+                    if (!weakSelf || weakSelf->IsBeingDeleted()) return;
+                    auto* const frame = weakSelf.get();
+                    frame->browserSaveActive_ = false;
+                    frame->Enable(true);
+
+                    const std::size_t index = neotabs::findDocumentIndexForPage(
+                        frame->documents_, targetPage);
+                    if (index == neotabs::npos) return;
+
+                    DocumentTab& savedDocument = frame->documents_[index];
+                    savedDocument.saveInProgress = false;
+                    if (!result.error.empty() || result.cancelled()) {
+                        savedDocument.model->gff().dirty(wasDirty);
+                        frame->updateDocumentTabTitle(savedDocument);
+                        if (index == frame->activeDocumentIndex_) frame->refreshHeader();
+                        const std::string message = result.error.empty()
+                            ? "The browser save transaction was cancelled."
+                            : result.error;
+                        wxMessageBox(wxui::toWx(message), "Save Failed",
+                                     wxOK | wxICON_ERROR, frame);
+                        return;
+                    }
+
+                    savedDocument.logicalFilename = target;
+                    savedDocument.model->gff().dirty(false);
+                    if (!frame->importOwnsPath(savedDocument.sourceImport, target)) {
+                        savedDocument.sourceImport.reset();
+                    }
+                    frame->rememberRecentFile(target);
+                    neogames::resolver().inferFromOpenedPath(target);
+                    frame->updateDocumentTabTitle(savedDocument);
+                    if (index == frame->activeDocumentIndex_) frame->refreshAll();
+
+                    if (result.ready()) {
+                        wxui::showMessage(
+                            frame,
+                            "Replacement download ready",
+                            "The browser could not overwrite the original host file directly. "
+                            "A replacement DLG is ready in the download panel; download it before closing this page.");
+                    }
+                });
+            return true;
+#else
+            document.logicalFilename = target;
+            document.model->gff().dirty(false);
             rememberRecentFile(target);
             neogames::resolver().inferFromOpenedPath(target);
             updateTabTitle();
             refreshHeader();
             return true;
+#endif
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
             return false;
@@ -2003,19 +2140,28 @@ private:
 
     void tryLoadCachedTlk() {
         if (!hasActiveDocument()) return;
+#if defined(__EMSCRIPTEN__)
+        // Browser-import paths are process-local and cannot be reused across page loads.
+        settings_.clearLastTlkPath();
+#else
         const auto path = settings_.lastTlkPath();
         if (!path || path->empty()) return;
         try { model().loadTlk(*path); }
         catch (const std::exception&) { settings_.clearLastTlkPath(); }
+#endif
     }
 
-    void loadTlkFromPath(const std::filesystem::path& chosen) {
+    bool loadTlkFromPath(const std::filesystem::path& chosen, bool rememberPath = true) {
         try {
             model().loadTlk(chosen);
-            settings_.setLastTlkPath(chosen);
+            if (rememberPath) settings_.setLastTlkPath(chosen);
+            else settings_.clearLastTlkPath();
+            activeDocument().tlkAutoLoadWarning.clear();
             refreshAll();
+            return true;
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
+            return false;
         }
     }
 
@@ -2023,12 +2169,10 @@ private:
 #if defined(__EMSCRIPTEN__)
         if (!hasActiveDocument()) return;
         wxWindow* const targetPage = activeDocument().tabPage;
-        wxui::requestOpenFile(
-            this,
-            "Open TLK",
-            kTlkWildcard,
-            [this, targetPage](std::optional<std::filesystem::path> chosen) {
-                if (!chosen || IsBeingDeleted()) return;
+        requestBrowserImport(
+            "Open TLK", ".tlk", false,
+            [this, targetPage](neobrowser::BrowserImportLease import) {
+                if (import.empty() || IsBeingDeleted()) return;
                 if (!hasActiveDocument() || activeDocument().tabPage != targetPage) {
                     wxui::showMessage(
                         this,
@@ -2036,7 +2180,9 @@ private:
                         "The active document changed while the TLK picker was open. Select the TLK again from the intended tab.");
                     return;
                 }
-                loadTlkFromPath(*chosen);
+                // TlkLookup owns all decoded strings after load, so this one-shot
+                // import can be released as soon as the callback returns.
+                loadTlkFromPath(import.paths().front(), false);
             });
 #else
         const auto chosen = wxui::chooseOpenFile(this, "Open TLK", kTlkWildcard);
@@ -2691,12 +2837,12 @@ private:
 #if defined(__EMSCRIPTEN__)
         if (!hasActiveDocument()) return;
         wxWindow* const targetPage = activeDocument().tabPage;
-        wxui::requestOpenFile(
-            this,
+        requestBrowserImport(
             json ? "Import JSON" : "Import XML",
-            json ? kJsonWildcard : kXmlWildcard,
-            [this, targetPage, json](std::optional<std::filesystem::path> chosen) {
-                if (!chosen || IsBeingDeleted()) return;
+            json ? ".json" : ".xml",
+            false,
+            [this, targetPage, json](neobrowser::BrowserImportLease import) {
+                if (import.empty() || IsBeingDeleted()) return;
                 if (!hasActiveDocument() || activeDocument().tabPage != targetPage) {
                     wxui::showMessage(
                         this,
@@ -2704,7 +2850,7 @@ private:
                         "The active document changed while the import picker was open. Start the import again from the intended tab.");
                     return;
                 }
-                importFromPath(json, *chosen);
+                importFromPath(json, import.paths().front());
             });
 #else
         const auto chosen = wxui::chooseOpenFile(
@@ -2721,7 +2867,8 @@ private:
             wxui::showMessage(this, "Export", "Semantic XML/JSON export is available for classic GFF V3 DLG files.");
             return;
         }
-        const std::string stem = model().filename().empty() ? "dialog" : neosettings::pathToUtf8(model().filename().stem());
+        const std::filesystem::path sourcePath = documentFilename(activeDocument());
+        const std::string stem = sourcePath.empty() ? "dialog" : neosettings::pathToUtf8(sourcePath.stem());
         const auto chosen = wxui::chooseSaveFile(this, json ? "Export JSON" : "Export XML",
                                                   json ? kJsonWildcard : kXmlWildcard,
                                                   stem + (json ? ".json" : ".xml"));
@@ -2736,9 +2883,10 @@ private:
         neodlg::patcher::DlgPatchMode patchMode,
         std::optional<std::filesystem::path> originalPath) {
         try {
-            std::string defaultName = model().filename().empty()
+            const std::filesystem::path sourcePath = documentFilename(activeDocument());
+            std::string defaultName = sourcePath.empty()
                 ? "modified.dlg"
-                : neosettings::pathToUtf8(model().filename().filename());
+                : neosettings::pathToUtf8(sourcePath.filename());
             const auto patchName = wxui::promptText(
                 this,
                 "Patch Target Filename",
@@ -2856,12 +3004,10 @@ private:
 
 #if defined(__EMSCRIPTEN__)
             wxWindow* const targetPage = activeDocument().tabPage;
-            wxui::requestOpenFile(
-                this,
-                "Select clean/unmodified DLG",
-                kDlgWildcard,
-                [this, targetPage, patchMode](std::optional<std::filesystem::path> originalPath) {
-                    if (!originalPath || IsBeingDeleted()) return;
+            requestBrowserImport(
+                "Select clean/unmodified DLG", ".dlg", false,
+                [this, targetPage, patchMode](neobrowser::BrowserImportLease import) {
+                    if (import.empty() || IsBeingDeleted()) return;
                     if (!hasActiveDocument() || activeDocument().tabPage != targetPage) {
                         wxui::showMessage(
                             this,
@@ -2869,7 +3015,7 @@ private:
                             "The active document changed while the baseline picker was open. Start the export again from the intended tab.");
                         return;
                     }
-                    continueExportPatcherPackage(patchMode, std::move(originalPath));
+                    continueExportPatcherPackage(patchMode, import.paths().front());
                 });
 #else
             const auto originalPath = wxui::chooseOpenFile(
@@ -2924,7 +3070,7 @@ private:
             SetStatusText("", 1);
             return;
         }
-        filePath_->ChangeValue(neosettings::pathToWx(model().filename()));
+        filePath_->ChangeValue(neosettings::pathToWx(documentFilename(activeDocument())));
         DlgDocument document = dialogue();
         const std::string type = trimHeader(model().fileType()) + " " + trimHeader(model().version()) +
                                  " - " + dialectName(document.dialect());
@@ -2938,7 +3084,9 @@ private:
             statsText_->SetLabel("Use GFF Tree view");
         }
         tlkText_->ChangeValue(model().tlk().loaded() ? neosettings::pathToWx(model().tlk().filename()) : wxString("none"));
-        SetStatusText(model().dirty() ? "Modified" : "Saved", 0);
+        SetStatusText(activeDocument().saveInProgress
+                          ? "Saving..."
+                          : (model().dirty() ? "Modified" : "Saved"), 0);
         SetStatusText(activeDocument().tlkAutoLoadWarning.empty() ? wxString{} : wxui::toWx(activeDocument().tlkAutoLoadWarning), 1);
     }
 
@@ -3533,7 +3681,9 @@ private:
 
         const std::string rootLabel = !model().loaded()
             ? std::string("No DLG loaded")
-            : (model().filename().empty() ? std::string("New DLG") : neosettings::pathToUtf8(model().filename()));
+            : (documentFilename(activeDocument()).empty()
+                   ? std::string("New DLG")
+                   : neosettings::pathToUtf8(documentFilename(activeDocument())));
         const wxTreeItemId root = rawTree_->AddRoot(
             wxui::toWx(rootLabel), -1, -1, new RawGffTreeItemData(std::string{}, -1));
         rawTreeRowItems_.assign(rawRows_.size(), wxTreeItemId{});
@@ -3780,6 +3930,12 @@ private:
     }
 
     void onClose(wxCloseEvent& event) {
+        if (browserSaveActive_ && event.CanVeto()) {
+            wxui::showMessage(this, "Save in progress",
+                              "Finish the browser save transaction before closing NeoDLG.");
+            event.Veto();
+            return;
+        }
         for (std::size_t i = 0; i < documents_.size(); ++i) {
             if (!confirmCloseDocument(i)) { event.Veto(); return; }
         }
@@ -3792,6 +3948,7 @@ private:
     std::size_t activeDocumentIndex_ = neotabs::npos;
     bool tabSwitchInProgress_ = false;
     bool treeRefreshInProgress_ = false;
+    bool browserSaveActive_ = false;
 
     std::unique_ptr<neogames::OpenGameDirectoryMenu> gameDirectoryMenu_;
     wxMenu* recentFilesMenu_ = nullptr;

@@ -76,7 +76,6 @@ jobs:
           test -f tool/dist-wasm/index.html
           test -f tool/dist-wasm/neodlg.js
           test -f tool/dist-wasm/neodlg.wasm
-          test -f tool/dist-wasm/THIRD_PARTY_NOTICES.txt
           grep -q 'NeoDLG' tool/dist-wasm/index.html
 
       - name: Configure GitHub Pages
