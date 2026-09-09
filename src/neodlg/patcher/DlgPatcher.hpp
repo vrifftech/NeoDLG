@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/GFFFile.hpp"
+#include "../../core/GFFFile.hpp"
 #include "TslPatcher.hpp"
 
 #include <filesystem>

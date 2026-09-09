@@ -1,6 +1,6 @@
 #pragma once
 
-#include "core/AppModel.hpp"
+#include "../../core/AppModel.hpp"
 
 #include <cstddef>
 #include <cstdint>

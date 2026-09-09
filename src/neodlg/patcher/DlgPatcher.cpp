@@ -1,6 +1,6 @@
 #include "DlgPatcher.hpp"
 
-#include "core/GffTypeNames.hpp"
+#include "../../core/GffTypeNames.hpp"
 
 #include <algorithm>
 #include <cctype>
