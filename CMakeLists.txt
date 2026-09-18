@@ -92,6 +92,12 @@ endif()
 
 if(NEODLG_BUILD_CLI)
     add_executable(neodlg-cli src/cli/main.cpp)
+    neo_add_windows_version_resource(neodlg-cli
+        VERSION "${PROJECT_VERSION}"
+        PRODUCT_NAME "NeoDLG"
+        FILE_DESCRIPTION "NeoDLG command-line BioWare conversation editor"
+        INTERNAL_NAME "neodlg-cli"
+        ORIGINAL_FILENAME "neodlg-cli.exe")
     target_link_libraries(neodlg-cli PRIVATE neodlg_core)
     if(MSVC)
         target_compile_options(neodlg-cli PRIVATE /W4 /permissive-)
@@ -175,21 +181,19 @@ if(NEODLG_BUILD_WX_GUI OR NEODLG_BUILD_WX_MODULE)
         if(NEODLG_BUILD_WX_GUI)
         set(NEODLG_WX_SOURCES src/wx/main.cpp)
         if(WIN32)
-            neo_configure_windows_version_resource(
-                NEODLG_WX_SOURCES_RC
-                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.rc.in"
-                "neodlg.rc"
-                "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.ico")
-            list(APPEND NEODLG_WX_SOURCES "${NEODLG_WX_SOURCES_RC}")
-        endif()
-
-        if(WIN32)
             add_executable(NeoDLG WIN32 ${NEODLG_WX_SOURCES})
         elseif(APPLE)
             add_executable(NeoDLG MACOSX_BUNDLE ${NEODLG_WX_SOURCES})
         else()
             add_executable(NeoDLG ${NEODLG_WX_SOURCES})
         endif()
+        neo_add_windows_version_resource(NeoDLG
+            VERSION "${PROJECT_VERSION}"
+            PRODUCT_NAME "NeoDLG"
+            FILE_DESCRIPTION "NeoDLG BioWare conversation editor"
+            INTERNAL_NAME "NeoDLG"
+            ORIGINAL_FILENAME "NeoDLG.exe"
+            ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.ico")
         neo_configure_macos_bundle(NeoDLG
             NAME "NeoDLG"
             IDENTIFIER "com.vrifftech.neodlg"
