@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/vrifftech/NeoDLG/actions/workflows/ci.yml/badge.svg)](https://github.com/vrifftech/NeoDLG/actions/workflows/ci.yml)
 
-NeoDLG is a purpose-built conversation editor for BioWare `DLG` resources.
+NeoDLG is a purpose-built conversation editor for Aurora Engine `DLG` resources.
 
 The editor supports:
 
@@ -18,6 +18,7 @@ The editor supports:
 The main workspace has two views.
 
 ### Conversation
+![neodlgui](https://github.com/vrifftech/NeoDLG/blob/main/images/neodlg.png)
 
 The conversation tree starts at `StartingList` and follows the actual Entry/Reply graph. It distinguishes:
 
