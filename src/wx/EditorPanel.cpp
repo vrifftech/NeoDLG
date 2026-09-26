@@ -32,6 +32,7 @@
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
 #include <wx/splitter.h>
+#include <wx/statbox.h>
 #include <wx/treectrl.h>
 #include <wx/wupdlock.h>
 #include <wx/wrapsizer.h>
@@ -442,6 +443,9 @@ private:
     wxTextCtrl* emotion_ = nullptr;
 };
 
+constexpr int kMoveParticipantUpId = wxID_HIGHEST + 12980;
+constexpr int kMoveParticipantDownId = wxID_HIGHEST + 12981;
+
 class ConversationPropertiesDialog final : public wxDialog {
 public:
     ConversationPropertiesDialog(wxWindow* parent, const DlgDocument& document)
@@ -552,21 +556,29 @@ public:
             auto* add = new wxButton(tagPage, wxID_ADD, "Add...");
             auto* edit = new wxButton(tagPage, wxID_EDIT, "Edit...");
             auto* remove = new wxButton(tagPage, wxID_DELETE, "Delete");
-            auto* moveUp = new wxButton(tagPage, wxID_ANY, "Up");
-            auto* moveDown = new wxButton(tagPage, wxID_ANY, "Down");
             buttons->Add(add, 0, wxRIGHT, 6);
             buttons->Add(edit, 0, wxRIGHT, 6);
-            buttons->Add(remove, 0, wxRIGHT, 12);
-            buttons->Add(moveUp, 0, wxRIGHT, 6);
-            buttons->Add(moveDown, 0);
+            buttons->Add(remove, 0);
             tagSizer->Add(buttons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
             tagPage->SetSizer(tagSizer);
             book->AddPage(tagPage, "Participants", false);
             add->Bind(wxEVT_BUTTON, &ConversationPropertiesDialog::onAddTag, this);
             edit->Bind(wxEVT_BUTTON, &ConversationPropertiesDialog::onEditTag, this);
             remove->Bind(wxEVT_BUTTON, &ConversationPropertiesDialog::onDeleteTag, this);
-            moveUp->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { moveTag(-1); });
-            moveDown->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { moveTag(1); });
+            Bind(wxEVT_MENU, [this](wxCommandEvent&) { moveTag(-1); }, kMoveParticipantUpId);
+            Bind(wxEVT_MENU, [this](wxCommandEvent&) { moveTag(1); }, kMoveParticipantDownId);
+            tags_->Bind(wxEVT_LIST_ITEM_RIGHT_CLICK, [this](wxListEvent& event) {
+                const long row = event.GetIndex();
+                if (row < 0 || static_cast<std::size_t>(row) >= tagValues_.size()) return;
+                tags_->SetItemState(row, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED,
+                                    wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+                wxMenu menu;
+                auto* moveUp = menu.Append(kMoveParticipantUpId, "Move Participant Up");
+                auto* moveDown = menu.Append(kMoveParticipantDownId, "Move Participant Down");
+                moveUp->Enable(row > 0);
+                moveDown->Enable(static_cast<std::size_t>(row + 1) < tagValues_.size());
+                tags_->PopupMenu(&menu);
+            });
         }
 
         root->Add(CreateStdDialogButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
@@ -732,7 +744,8 @@ private:
         std::swap(tagValues_[static_cast<std::size_t>(row)],
                   tagValues_[static_cast<std::size_t>(target)]);
         refreshTags();
-        tags_->SetItemState(target, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
+        tags_->SetItemState(target, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED,
+                            wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
     }
 
     bool jade_ = false;
@@ -899,6 +912,7 @@ enum : int {
     ID_Open,
     ID_Save,
     ID_SaveAs,
+    ID_DialogueInformation,
     ID_OpenTlk,
     ID_ClearTlk,
     ID_CloseTab,
@@ -924,6 +938,7 @@ enum : int {
     ID_ExportJson,
     ID_ExportPatcher,
     ID_ViewConversation,
+    ID_ViewSinglePanel,
     ID_ViewRaw,
     ID_DarkMode,
     ID_FontIncrease,
@@ -942,6 +957,12 @@ enum : int {
     ID_AnimationDelete,
     ID_AnimationUp,
     ID_AnimationDown,
+};
+
+enum class WorkspaceView {
+    Conversation,
+    SinglePanel,
+    Raw,
 };
 
 constexpr int ID_ModuleExit = wxID_HIGHEST + 13450;
@@ -1017,7 +1038,9 @@ public:
         conversationTreeRenderedDocumentPage_ = nullptr; rawTreeRenderedDocumentPage_ = nullptr;
         if (rawFilter_) rawFilter_->ChangeValue(wxString{});
         tryLoadCachedTlk();
-        setWorkspacePage(dialogue().semanticallyEditable() ? 0 : 1);
+        setWorkspaceView(dialogue().semanticallyEditable()
+                             ? WorkspaceView::Conversation
+                             : WorkspaceView::Raw);
 
         for (const auto& source : document.protectedInputs) {
             tryLoadResolvedTlkForPath(source);
@@ -1066,7 +1089,8 @@ private:
 #if defined(__EMSCRIPTEN__)
         neobrowser::BrowserImportLease sourceImport;
 #endif
-        int workspacePage = 0;
+        WorkspaceView workspaceView = WorkspaceView::Conversation;
+        WorkspaceView semanticView = WorkspaceView::Conversation;
         std::optional<DlgNodeRef> selectedNode;
         std::optional<DlgLinkRef> selectedLink;
         neotree::TreeViewState conversationTreeState;
@@ -1074,6 +1098,22 @@ private:
         std::string rawFilterTerm;
         std::vector<UndoSnapshot> undo;
         std::vector<UndoSnapshot> redo;
+    };
+
+    struct InspectorSection {
+        wxScrolledWindow* tabPage = nullptr;
+        wxBoxSizer* tabSizer = nullptr;
+        wxPanel* content = nullptr;
+        wxPanel* singleHost = nullptr;
+        wxStaticBoxSizer* singleSizer = nullptr;
+    };
+
+    struct DialogueSummary {
+        wxString file;
+        wxString type;
+        wxString statistics;
+        wxString tlk;
+        wxString warning;
     };
 
     bool hasActiveDocument() const {
@@ -1100,7 +1140,44 @@ private:
         return neotabs::displayNameForPath(documentFilename(tab), tab.untitledName);
     }
 
+    DialogueSummary currentDialogueSummary() const {
+        DialogueSummary summary;
+        if (!hasActiveDocument() || !model().loaded()) {
+            summary.file = "No DLG loaded";
+            summary.type = "None";
+            summary.statistics = "No conversation data";
+            summary.tlk = "none";
+            return summary;
+        }
 
+        const auto path = documentFilename(activeDocument());
+        if (!path.empty()) {
+            summary.file = neosettings::pathToWx(path);
+        } else if (!activeDocument().sourceDescription.empty()) {
+            summary.file = wxui::toWx(activeDocument().sourceDescription);
+        } else {
+            summary.file = wxui::toWx(tabDisplayName(activeDocument()));
+        }
+
+        const DlgDocument document = dialogue();
+        summary.type = wxui::toWx(trimHeader(model().fileType()) + " " +
+                                  trimHeader(model().version()) + " - " +
+                                  dialectName(document.dialect()));
+        if (document.semanticallyEditable()) {
+            const DlgStatistics stats = document.statistics();
+            summary.statistics = wxui::toWx(
+                std::to_string(stats.entries) + " entries, " +
+                std::to_string(stats.replies) + " replies, " +
+                std::to_string(stats.totalLinks) + " links");
+        } else {
+            summary.statistics = "Use GFF Structure Tree for this schema";
+        }
+        summary.tlk = model().tlk().loaded()
+            ? neosettings::pathToWx(model().tlk().filename())
+            : wxString("none");
+        summary.warning = wxui::toWx(activeDocument().tlkAutoLoadWarning);
+        return summary;
+    }
 
     void buildMenus() {
         auto* file = new wxMenu;
@@ -1114,8 +1191,12 @@ private:
         rebuildRecentFilesMenu();
         file->AppendSubMenu(recentFilesMenu_, "Open &Recent");
         file->AppendSeparator();
-        file->Append(ID_OpenTlk, "Open optional &TLK...");
-        file->Append(ID_ClearTlk, "Clear TLK");
+        auto* dialogueFileMenu = new wxMenu;
+        dialogueFileMenu->Append(ID_DialogueInformation, "&Information...");
+        dialogueFileMenu->AppendSeparator();
+        dialogueFileMenu->Append(ID_OpenTlk, "Open optional &TLK...");
+        dialogueFileMenu->Append(ID_ClearTlk, "Clear TLK");
+        file->AppendSubMenu(dialogueFileMenu, "&Dialogue");
         file->AppendSeparator();
         file->Append(ID_Save, "&Save\tCtrl-S");
         file->Append(ID_SaveAs, "Save &As...");
@@ -1162,6 +1243,7 @@ private:
 
         auto* view = new wxMenu;
         conversationViewItem_ = view->AppendRadioItem(ID_ViewConversation, "Conversation Editor");
+        singlePanelViewItem_ = view->AppendRadioItem(ID_ViewSinglePanel, "Single Panel Editor");
         rawViewItem_ = view->AppendRadioItem(ID_ViewRaw, "GFF Structure Tree");
         conversationViewItem_->Check(true);
         view->AppendSeparator();
@@ -1193,6 +1275,7 @@ private:
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onOpenRecent, this, kRecentFileBaseId, kClearRecentFilesId);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onSave, this, ID_Save);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onSaveAs, this, ID_SaveAs);
+        Bind(wxEVT_MENU, &NeoDLGPanelImpl::onDialogueInformation, this, ID_DialogueInformation);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onOpenTlk, this, ID_OpenTlk);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onClearTlk, this, ID_ClearTlk);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onCloseTab, this, ID_CloseTab);
@@ -1217,8 +1300,9 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { onExport(false); }, ID_ExportXml);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { onExport(true); }, ID_ExportJson);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onExportPatcherPackage, this, ID_ExportPatcher);
-        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspacePage(0); }, ID_ViewConversation);
-        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspacePage(1); }, ID_ViewRaw);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspaceView(WorkspaceView::Conversation); }, ID_ViewConversation);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspaceView(WorkspaceView::SinglePanel); }, ID_ViewSinglePanel);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspaceView(WorkspaceView::Raw); }, ID_ViewRaw);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onToggleDarkMode, this, ID_DarkMode);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onIncreaseFontScale, this, ID_FontIncrease);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onDecreaseFontScale, this, ID_FontDecrease);
@@ -1241,33 +1325,6 @@ private:
         neotabs::configureDocumentTabStrip(documentTabs_);
         root->Add(documentTabs_, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(8));
 
-        auto* header = new wxStaticBoxSizer(wxVERTICAL, panel, "Dialogue");
-        auto* fileRow = new wxBoxSizer(wxHORIZONTAL);
-        fileRow->Add(new wxStaticText(panel, wxID_ANY, "File:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-        filePath_ = new wxTextCtrl(panel, wxID_ANY, wxEmptyString, wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
-        fileRow->Add(filePath_, 1, wxEXPAND | wxRIGHT, 8);
-        fileRow->Add(new wxButton(panel, ID_Open, "Open..."), 0, wxRIGHT, 4);
-        fileRow->Add(new wxButton(panel, ID_Save, "Save"), 0, wxRIGHT, 4);
-        fileRow->Add(new wxButton(panel, ID_SaveAs, "Save As..."), 0);
-        header->Add(fileRow, 0, wxEXPAND | wxALL, 8);
-
-        auto* infoRow = new wxBoxSizer(wxHORIZONTAL);
-        typeText_ = new wxStaticText(panel, wxID_ANY, "No DLG loaded");
-        infoRow->Add(typeText_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 16);
-        statsText_ = new wxStaticText(panel, wxID_ANY, wxEmptyString);
-        infoRow->Add(statsText_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 16);
-        infoRow->AddStretchSpacer(1);
-        header->Add(infoRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-
-        auto* tlkRow = new wxBoxSizer(wxHORIZONTAL);
-        tlkRow->Add(new wxStaticText(panel, wxID_ANY, "TLK:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
-        tlkText_ = new wxTextCtrl(panel, wxID_ANY, "none", wxDefaultPosition, wxDefaultSize, wxTE_READONLY);
-        tlkRow->Add(tlkText_, 1, wxEXPAND | wxRIGHT, 8);
-        tlkRow->Add(new wxButton(panel, ID_OpenTlk, "Choose..."), 0, wxRIGHT, 4);
-        tlkRow->Add(new wxButton(panel, ID_ClearTlk, "Clear"), 0);
-        header->Add(tlkRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 8);
-        root->Add(header, 0, wxEXPAND | wxALL, 8);
-
         workspaceBook_ = new wxNotebook(panel, ID_Workspace);
         buildConversationPage(workspaceBook_);
         buildRawPage(workspaceBook_);
@@ -1278,19 +1335,12 @@ private:
         moduleLayout->Add(panel, 1, wxEXPAND);
         SetSizer(moduleLayout);
 
-        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onOpen, this, ID_Open);
-        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onSave, this, ID_Save);
-        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onSaveAs, this, ID_SaveAs);
-        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onOpenTlk, this, ID_OpenTlk);
-        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onClearTlk, this, ID_ClearTlk);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onAddStartingEntry, this, ID_AddStartingEntry);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onAddChild, this, ID_AddChild);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onLinkExisting, this, ID_LinkExisting);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onDuplicateNode, this, ID_DuplicateNode);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onRemoveLink, this, ID_RemoveLink);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onDeleteNode, this, ID_DeleteNode);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { moveSelectedLink(-1); }, ID_MoveLinkUp);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { moveSelectedLink(1); }, ID_MoveLinkDown);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onFindNext, this, ID_FindNext);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onApplyNode, this, ID_ApplyNode);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onApplyScripts, this, ID_ApplyScripts);
@@ -1299,8 +1349,8 @@ private:
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onAnimationAdd, this, ID_AnimationAdd);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onAnimationEdit, this, ID_AnimationEdit);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onAnimationDelete, this, ID_AnimationDelete);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { moveAnimation(-1); }, ID_AnimationUp);
-        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { moveAnimation(1); }, ID_AnimationDown);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { moveAnimation(-1); }, ID_AnimationUp);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { moveAnimation(1); }, ID_AnimationDown);
         Bind(wxEVT_TREE_ITEM_ACTIVATED, &NeoDLGPanelImpl::onRawTreeActivated, this, ID_RawTree);
         Bind(wxEVT_TREE_ITEM_EXPANDING, &NeoDLGPanelImpl::onRawTreeExpanding, this, ID_RawTree);
         Bind(wxEVT_TREE_SEL_CHANGED, &NeoDLGPanelImpl::onTreeSelection, this, ID_ConversationTree);
@@ -1312,7 +1362,15 @@ private:
     }
 
     void buildConversationPage(wxNotebook* parent) {
-        auto* page = new wxPanel(parent);
+        conversationWorkspacePage_ = new wxPanel(parent);
+        singlePanelWorkspacePage_ = new wxPanel(parent);
+        conversationWorkspaceSizer_ = new wxBoxSizer(wxVERTICAL);
+        singlePanelWorkspaceSizer_ = new wxBoxSizer(wxVERTICAL);
+        conversationWorkspacePage_->SetSizer(conversationWorkspaceSizer_);
+        singlePanelWorkspacePage_->SetSizer(singlePanelWorkspaceSizer_);
+
+        semanticWorkspace_ = new wxPanel(conversationWorkspacePage_);
+        auto* page = semanticWorkspace_;
         auto* root = new wxBoxSizer(wxVERTICAL);
 
         auto* toolbar = new wxWrapSizer(wxHORIZONTAL);
@@ -1326,8 +1384,6 @@ private:
         addToolbarButton(ID_DuplicateNode, "Duplicate");
         addToolbarButton(ID_RemoveLink, "Remove Link");
         addToolbarButton(ID_DeleteNode, "Delete Node");
-        addToolbarButton(ID_MoveLinkUp, "Up");
-        addToolbarButton(ID_MoveLinkDown, "Down");
         root->Add(toolbar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
 
         auto* findRow = new wxBoxSizer(wxHORIZONTAL);
@@ -1344,34 +1400,165 @@ private:
         conversationTree_ = new wxTreeCtrl(splitter, ID_ConversationTree, wxDefaultPosition, wxDefaultSize,
                                             wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE);
         conversationTree_->SetName("NeoDLG conversation tree");
-        inspectorBook_ = new wxNotebook(splitter, wxID_ANY);
+
+        inspectorHost_ = new wxPanel(splitter);
+        auto* inspectorHostSizer = new wxBoxSizer(wxVERTICAL);
+        inspectorBook_ = new wxNotebook(inspectorHost_, wxID_ANY);
+        singleInspector_ = new wxScrolledWindow(inspectorHost_, wxID_ANY, wxDefaultPosition,
+                                                 wxDefaultSize, wxVSCROLL);
+        singleInspector_->SetScrollRate(0, FromDIP(10));
+        singleInspectorSizer_ = new wxBoxSizer(wxVERTICAL);
+        singleInspector_->SetSizer(singleInspectorSizer_);
+        singleInspector_->Hide();
+        inspectorHostSizer->Add(inspectorBook_, 1, wxEXPAND);
+        inspectorHostSizer->Add(singleInspector_, 1, wxEXPAND);
+        inspectorHost_->SetSizer(inspectorHostSizer);
+
         buildNodePage(inspectorBook_);
         buildScriptsPage(inspectorBook_);
         buildPresentationPage(inspectorBook_);
         buildLinkPage(inspectorBook_);
         buildAnimationsPage(inspectorBook_);
-        splitter->SplitVertically(conversationTree_, inspectorBook_, FromDIP(520));
+        splitter->SplitVertically(conversationTree_, inspectorHost_, FromDIP(520));
         splitter->SetMinimumPaneSize(FromDIP(280));
         splitter->SetSashGravity(0.38);
         root->Add(splitter, 1, wxEXPAND);
 
         page->SetSizer(root);
-        parent->AddPage(page, "Conversation", true);
+        conversationWorkspaceSizer_->Add(page, 1, wxEXPAND);
+        parent->AddPage(conversationWorkspacePage_, "Conversation", true);
+        parent->AddPage(singlePanelWorkspacePage_, "Single Panel", false);
     }
 
-    wxScrolledWindow* makeInspectorPage(wxNotebook* book, const wxString& title, wxBoxSizer*& root) {
-        auto* page = new wxScrolledWindow(book, wxID_ANY, wxDefaultPosition, wxDefaultSize, wxVSCROLL);
-        page->SetScrollRate(0, FromDIP(10));
+    void setSemanticWorkspaceHost(bool singlePanel) {
+        if (!semanticWorkspace_ || !conversationWorkspacePage_ ||
+            !singlePanelWorkspacePage_ || !conversationWorkspaceSizer_ ||
+            !singlePanelWorkspaceSizer_) {
+            return;
+        }
+
+        wxPanel* const targetPage = singlePanel
+            ? singlePanelWorkspacePage_
+            : conversationWorkspacePage_;
+        if (semanticWorkspace_->GetParent() == targetPage) return;
+
+        wxPanel* const sourcePage = semanticWorkspace_->GetParent() == singlePanelWorkspacePage_
+            ? singlePanelWorkspacePage_
+            : conversationWorkspacePage_;
+        wxBoxSizer* const sourceSizer = sourcePage == singlePanelWorkspacePage_
+            ? singlePanelWorkspaceSizer_
+            : conversationWorkspaceSizer_;
+        wxBoxSizer* const targetSizer = singlePanel
+            ? singlePanelWorkspaceSizer_
+            : conversationWorkspaceSizer_;
+
+        wxWindowUpdateLocker updateLocker(workspaceBook_);
+        semanticWorkspace_->Hide();
+        sourceSizer->Detach(semanticWorkspace_);
+        semanticWorkspace_->Reparent(targetPage);
+        targetSizer->Add(semanticWorkspace_, 1, wxEXPAND);
+        semanticWorkspace_->Show();
+        sourcePage->Layout();
+        targetPage->Layout();
+    }
+
+    wxPanel* makeInspectorSection(wxNotebook* book,
+                                  const wxString& title,
+                                  wxBoxSizer*& root) {
+        auto* tabPage = new wxScrolledWindow(book, wxID_ANY, wxDefaultPosition,
+                                              wxDefaultSize, wxVSCROLL);
+        tabPage->SetScrollRate(0, FromDIP(10));
+        auto* tabSizer = new wxBoxSizer(wxVERTICAL);
+        auto* content = new wxPanel(tabPage);
         root = new wxBoxSizer(wxVERTICAL);
-        page->SetSizer(root);
-        book->AddPage(page, title, false);
-        return page;
+        content->SetSizer(root);
+        tabSizer->Add(content, 1, wxEXPAND);
+        tabPage->SetSizer(tabSizer);
+        book->AddPage(tabPage, title, false);
+
+        auto* singleHost = new wxPanel(singleInspector_);
+        auto* singleSizer = new wxStaticBoxSizer(wxVERTICAL, singleHost, title);
+        singleHost->SetSizer(singleSizer);
+        singleInspectorSizer_->Add(singleHost, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP,
+                                   FromDIP(6));
+
+        inspectorSections_.push_back({tabPage, tabSizer, content, singleHost, singleSizer});
+        return content;
+    }
+
+    void setInspectorSectionTitle(std::size_t index, const wxString& title) {
+        if (index >= inspectorSections_.size()) return;
+        if (inspectorBook_ && index < inspectorBook_->GetPageCount()) {
+            inspectorBook_->SetPageText(index, title);
+        }
+        auto* const staticBox = inspectorSections_[index].singleSizer
+            ? inspectorSections_[index].singleSizer->GetStaticBox()
+            : nullptr;
+        if (staticBox) staticBox->SetLabel(title);
+    }
+
+    void refreshInspectorLayouts() {
+        for (auto& section : inspectorSections_) {
+            if (section.content) section.content->Layout();
+            if (section.tabPage) {
+                section.tabPage->Layout();
+                section.tabPage->FitInside();
+            }
+            if (section.singleHost) section.singleHost->Layout();
+        }
+        if (singleInspector_) {
+            singleInspector_->Layout();
+            singleInspector_->FitInside();
+        }
+        if (inspectorHost_) inspectorHost_->Layout();
+    }
+
+    void setSinglePanelLayout(bool singlePanel) {
+        if (!inspectorBook_ || !singleInspector_ || !inspectorHost_) return;
+        if (singlePanelActive_ == singlePanel) {
+            inspectorBook_->Show(!singlePanel);
+            singleInspector_->Show(singlePanel);
+            refreshInspectorLayouts();
+            return;
+        }
+
+        wxWindowUpdateLocker updateLocker(inspectorHost_);
+        inspectorBook_->Hide();
+        singleInspector_->Hide();
+
+        for (auto& section : inspectorSections_) {
+            if (!section.content || !section.tabPage || !section.tabSizer ||
+                !section.singleSizer) {
+                continue;
+            }
+
+            section.content->Hide();
+            if (section.content->GetParent() == section.tabPage) {
+                section.tabSizer->Detach(section.content);
+            } else {
+                section.singleSizer->Detach(section.content);
+            }
+
+            if (singlePanel) {
+                wxWindow* const target = section.singleSizer->GetStaticBox();
+                section.content->Reparent(target);
+                section.singleSizer->Add(section.content, 0, wxEXPAND | wxALL, FromDIP(4));
+            } else {
+                section.content->Reparent(section.tabPage);
+                section.tabSizer->Add(section.content, 1, wxEXPAND);
+            }
+            section.content->Show();
+        }
+
+        singlePanelActive_ = singlePanel;
+        inspectorBook_->Show(!singlePanel);
+        singleInspector_->Show(singlePanel);
+        refreshInspectorLayouts();
     }
 
     void buildNodePage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
-        wxScrolledWindow* page = makeInspectorPage(book, "Line", root);
-        linePage_ = page;
+        wxPanel* page = makeInspectorSection(book, "Line", root);
         nodeHeader_ = new wxTextCtrl(page, wxID_ANY, "Select a dialogue node.", wxDefaultPosition,
                                      FromDIP(wxSize(-1, 92)),
                                      wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP | wxBORDER_NONE);
@@ -1411,8 +1598,7 @@ private:
 
     void buildScriptsPage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
-        wxScrolledWindow* page = makeInspectorPage(book, "Scripts / Quest", root);
-        scriptsPage_ = page;
+        wxPanel* page = makeInspectorSection(book, "Scripts / Quest", root);
         auto* form = new wxFlexGridSizer(2, 8, 8);
         form->AddGrowableCol(1, 1);
         nodeScript1_ = addTextField(page, form, "Action script 1:", 0, wxDefaultSize, &nodeScript1Label_);
@@ -1447,8 +1633,7 @@ private:
 
     void buildPresentationPage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
-        wxScrolledWindow* page = makeInspectorPage(book, "Presentation", root);
-        presentationPage_ = page;
+        wxPanel* page = makeInspectorSection(book, "Presentation", root);
         jadePresentationNote_ = new wxStaticText(
             page, wxID_ANY,
             "Jade Empire dialogue presentation is controlled by Entry camera scripts/tags and the Animations page. "
@@ -1655,10 +1840,7 @@ private:
         }
 
         nodeCamVidEffectPanel_->Layout();
-        if (presentationPage_) {
-            presentationPage_->Layout();
-            presentationPage_->FitInside();
-        }
+        refreshInspectorLayouts();
     }
 
     std::int32_t cameraVideoEffectValue(DlgFlavor flavor) const {
@@ -1754,8 +1936,7 @@ private:
 
     void buildLinkPage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
-        wxScrolledWindow* page = makeInspectorPage(book, "Link / Conditions", root);
-        linkPage_ = page;
+        wxPanel* page = makeInspectorSection(book, "Link / Conditions", root);
         linkHeader_ = new wxStaticText(page, wxID_ANY, "Select a linked node to edit its conditions.");
         wxFont bold = linkHeader_->GetFont();
         bold.SetWeight(wxFONTWEIGHT_BOLD);
@@ -1792,8 +1973,8 @@ private:
     }
 
     void buildAnimationsPage(wxNotebook* book) {
-        auto* page = new wxPanel(book);
-        auto* root = new wxBoxSizer(wxVERTICAL);
+        wxBoxSizer* root = nullptr;
+        wxPanel* page = makeInspectorSection(book, "Animations", root);
         animationList_ = new wxListCtrl(page, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                         wxLC_REPORT | wxLC_SINGLE_SEL);
         animationList_->InsertColumn(0, "Participant");
@@ -1802,21 +1983,33 @@ private:
         animationList_->SetColumnWidth(0, FromDIP(220));
         animationList_->SetColumnWidth(1, FromDIP(130));
         animationList_->SetColumnWidth(2, FromDIP(130));
+        animationList_->SetMinSize(FromDIP(wxSize(-1, 220)));
         root->Add(animationList_, 1, wxEXPAND | wxALL, 10);
         auto* buttons = new wxBoxSizer(wxHORIZONTAL);
         animationAddButton_ = new wxButton(page, ID_AnimationAdd, "Add...");
         animationEditButton_ = new wxButton(page, ID_AnimationEdit, "Edit...");
         animationDeleteButton_ = new wxButton(page, ID_AnimationDelete, "Delete");
-        animationUpButton_ = new wxButton(page, ID_AnimationUp, "Up");
-        animationDownButton_ = new wxButton(page, ID_AnimationDown, "Down");
         buttons->Add(animationAddButton_, 0, wxRIGHT, 4);
         buttons->Add(animationEditButton_, 0, wxRIGHT, 4);
-        buttons->Add(animationDeleteButton_, 0, wxRIGHT, 12);
-        buttons->Add(animationUpButton_, 0, wxRIGHT, 4);
-        buttons->Add(animationDownButton_, 0);
+        buttons->Add(animationDeleteButton_, 0);
         root->Add(buttons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
-        page->SetSizer(root);
-        book->AddPage(page, "Animations", false);
+
+        animationList_->Bind(wxEVT_LIST_ITEM_RIGHT_CLICK, [this](wxListEvent& event) {
+            const long row = event.GetIndex();
+            if (row < 0 || static_cast<std::size_t>(row) >= animationValues_.size()) return;
+            animationList_->SetItemState(row, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED,
+                                         wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+            const bool jadeReply = hasActiveDocument() && activeDocument().selectedNode &&
+                dialogue().dialect() == DlgDialect::JadeEmpire &&
+                activeDocument().selectedNode->kind == DlgNodeKind::Reply;
+            wxMenu menu;
+            auto* moveUp = menu.Append(ID_AnimationUp, "Move Animation Up");
+            auto* moveDown = menu.Append(ID_AnimationDown, "Move Animation Down");
+            moveUp->Enable(!jadeReply && row > 0);
+            moveDown->Enable(!jadeReply &&
+                             static_cast<std::size_t>(row + 1) < animationValues_.size());
+            animationList_->PopupMenu(&menu);
+        });
     }
 
     void buildRawPage(wxNotebook* parent) {
@@ -1954,7 +2147,7 @@ private:
         tabSwitchInProgress_ = false;
         activeDocumentIndex_ = index;
         if (rawFilter_) rawFilter_->ChangeValue(wxui::toWx(activeDocument().rawFilterTerm));
-        setWorkspacePage(activeDocument().workspacePage, false);
+        setWorkspaceView(activeDocument().workspaceView, false);
         refreshAll();
     }
 
@@ -1982,6 +2175,7 @@ private:
         if (documents_.empty()) {
             activeDocumentIndex_ = neotabs::npos;
             createDocumentTab(true);
+            setWorkspaceView(activeDocument().workspaceView, false);
             refreshAll();
             return true;
         }
@@ -2021,7 +2215,7 @@ private:
             if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) conversationTreeRenderedDocumentPage_ = nullptr;
             if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) rawTreeRenderedDocumentPage_ = nullptr;
             if (rawFilter_) rawFilter_->ChangeValue(wxString{});
-            setWorkspacePage(0);
+            setWorkspaceView(WorkspaceView::Conversation);
             refreshAll();
         } catch (const std::exception& ex) {
             wxui::showError(this, ex);
@@ -2086,7 +2280,7 @@ private:
         rememberRecentFile(path);
         neogames::resolver().inferFromOpenedPath(path);
         const bool semantic = dialogue().semanticallyEditable();
-        setWorkspacePage(semantic ? 0 : 1);
+        setWorkspaceView(semantic ? WorkspaceView::Conversation : WorkspaceView::Raw);
         refreshAll();
         return true;
     }
@@ -2119,6 +2313,43 @@ private:
 
     void onSave(wxCommandEvent&) { save(false); }
     void onSaveAs(wxCommandEvent&) { save(true); }
+
+    void onDialogueInformation(wxCommandEvent&) {
+        const DialogueSummary summary = currentDialogueSummary();
+        wxDialog dialog(this, wxID_ANY, "Dialogue Information", wxDefaultPosition,
+                        wxDefaultSize, wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER);
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        auto* form = new wxFlexGridSizer(2, FromDIP(8), FromDIP(8));
+        form->AddGrowableCol(1, 1);
+
+        const auto addValue = [&](const wxString& label,
+                                  const wxString& value,
+                                  bool multiline) {
+            form->Add(new wxStaticText(&dialog, wxID_ANY, label), 0,
+                      wxALIGN_TOP | wxRIGHT, FromDIP(8));
+            long style = wxTE_READONLY;
+            if (multiline) style |= wxTE_MULTILINE | wxTE_WORDWRAP;
+            auto* control = new wxTextCtrl(&dialog, wxID_ANY, value,
+                                           wxDefaultPosition, wxDefaultSize, style);
+            if (multiline) control->SetMinSize(FromDIP(wxSize(480, 58)));
+            form->Add(control, 1, wxEXPAND);
+        };
+
+        addValue("File:", summary.file, true);
+        addValue("Format:", summary.type, false);
+        addValue("Contents:", summary.statistics, false);
+        addValue("TLK:", summary.tlk, true);
+        if (!summary.warning.empty()) addValue("TLK warning:", summary.warning, true);
+
+        root->Add(form, 1, wxEXPAND | wxALL, FromDIP(12));
+        root->Add(dialog.CreateStdDialogButtonSizer(wxOK), 0,
+                  wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(12));
+        dialog.SetSizerAndFit(root);
+        wxui::configureResponsiveWindow(dialog, wxSize(720, 420), wxSize(520, 300));
+        dialog.CentreOnParent();
+        wxui::constrainWindowToDisplay(dialog);
+        dialog.ShowModal();
+    }
 
     bool save(bool saveAs, const std::filesystem::path& forcedTarget = {}) {
         if (!hasActiveDocument() || !model().loaded()) return false;
@@ -2897,16 +3128,25 @@ private:
     void moveAnimation(int delta) {
         if (!activeDocument().selectedNode) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
-        if (dialogue().dialect() == DlgDialect::JadeEmpire && ref.kind == DlgNodeKind::Reply) return;
+        if (dialogue().dialect() == DlgDialect::JadeEmpire &&
+            ref.kind == DlgNodeKind::Reply) {
+            return;
+        }
         const long row = selectedAnimationRow();
         const long target = row + delta;
-        if (row < 0 || target < 0 || static_cast<std::size_t>(target) >= animationValues_.size()) return;
+        if (row < 0 || target < 0 ||
+            static_cast<std::size_t>(target) >= animationValues_.size()) {
+            return;
+        }
         mutate("Move dialogue animation", [this, ref, row, target]() {
             auto values = dialogue().animations(ref);
-            std::swap(values[static_cast<std::size_t>(row)], values[static_cast<std::size_t>(target)]);
+            std::swap(values[static_cast<std::size_t>(row)],
+                      values[static_cast<std::size_t>(target)]);
             dialogue().replaceAnimations(ref, values);
         });
-        animationList_->SetItemState(target, wxLIST_STATE_SELECTED, wxLIST_STATE_SELECTED);
+        animationList_->SetItemState(target,
+                                     wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED,
+                                     wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
     }
 
     void importFromPath(bool json, const std::filesystem::path& chosen) {
@@ -3116,23 +3356,56 @@ private:
         }
     }
 
-    void setWorkspacePage(int page, bool refresh = true) {
-        if (!workspaceBook_ || page < 0 || page >= static_cast<int>(workspaceBook_->GetPageCount())) return;
-        if (hasActiveDocument()) activeDocument().workspacePage = page;
+    void setWorkspaceView(WorkspaceView view, bool refresh = true) {
+        if (!workspaceBook_ || workspaceBook_->GetPageCount() < 3) return;
+
+        WorkspaceView semanticView = view;
+        if (hasActiveDocument()) {
+            if (view == WorkspaceView::Raw) {
+                semanticView = activeDocument().semanticView;
+            } else {
+                activeDocument().semanticView = view;
+            }
+            activeDocument().workspaceView = view;
+        } else if (view == WorkspaceView::Raw) {
+            semanticView = singlePanelActive_
+                ? WorkspaceView::SinglePanel
+                : WorkspaceView::Conversation;
+        }
+
+        const bool singlePanel = semanticView == WorkspaceView::SinglePanel;
+        setSemanticWorkspaceHost(singlePanel);
+        setSinglePanelLayout(singlePanel);
+
+        int page = 0;
+        if (view == WorkspaceView::SinglePanel) page = 1;
+        else if (view == WorkspaceView::Raw) page = 2;
         if (workspaceBook_->GetSelection() != page) workspaceBook_->ChangeSelection(page);
-        if (conversationViewItem_) conversationViewItem_->Check(page == 0);
-        if (rawViewItem_) rawViewItem_->Check(page == 1);
+
+        if (conversationViewItem_) conversationViewItem_->Check(view == WorkspaceView::Conversation);
+        if (singlePanelViewItem_) singlePanelViewItem_->Check(view == WorkspaceView::SinglePanel);
+        if (rawViewItem_) rawViewItem_->Check(view == WorkspaceView::Raw);
+
         if (refresh) {
-            if (page == 0) refreshConversationTree();
-            else refreshRawTree();
+            if (view == WorkspaceView::Raw) refreshRawTree();
+            else refreshConversationTree();
         }
     }
 
     void onWorkspacePageChanged(wxBookCtrlEvent& event) {
-        if (hasActiveDocument()) activeDocument().workspacePage = event.GetSelection();
-        if (event.GetSelection() == 1) refreshRawTree();
-        if (conversationViewItem_) conversationViewItem_->Check(event.GetSelection() == 0);
-        if (rawViewItem_) rawViewItem_->Check(event.GetSelection() == 1);
+        switch (event.GetSelection()) {
+        case 0:
+            setWorkspaceView(WorkspaceView::Conversation);
+            break;
+        case 1:
+            setWorkspaceView(WorkspaceView::SinglePanel);
+            break;
+        case 2:
+            setWorkspaceView(WorkspaceView::Raw);
+            break;
+        default:
+            break;
+        }
         event.Skip();
     }
 
@@ -3141,41 +3414,27 @@ private:
         refreshHeader();
         updateTabTitle();
         refreshUndoMenu();
-        if (activeDocument().workspacePage == 0) refreshConversationTree();
-        else refreshRawTree();
+        if (activeDocument().workspaceView == WorkspaceView::Raw) refreshRawTree();
+        else refreshConversationTree();
         refreshInspector();
     }
 
     void refreshHeader() {
         if (!hasActiveDocument() || !model().loaded()) {
-            filePath_->ChangeValue("");
-            typeText_->SetLabel("No DLG loaded");
-            statsText_->SetLabel("");
-            tlkText_->ChangeValue("none");
             setModuleStatusText("Ready", 0);
-            setModuleStatusText("", 1);
+            setModuleStatusText("No DLG loaded", 1);
             return;
         }
-        const auto path = documentFilename(activeDocument());
-        filePath_->ChangeValue(path.empty() ? wxui::toWx(activeDocument().sourceDescription)
-                                            : neosettings::pathToWx(path));
-        DlgDocument document = dialogue();
-        const std::string type = trimHeader(model().fileType()) + " " + trimHeader(model().version()) +
-                                 " - " + dialectName(document.dialect());
-        typeText_->SetLabel(wxui::toWx(type));
-        if (document.semanticallyEditable()) {
-            const DlgStatistics stats = document.statistics();
-            statsText_->SetLabel(wxui::toWx(std::to_string(stats.entries) + " entries, " +
-                                                     std::to_string(stats.replies) + " replies, " +
-                                                     std::to_string(stats.totalLinks) + " links"));
-        } else {
-            statsText_->SetLabel("Use GFF Tree view");
-        }
-        tlkText_->ChangeValue(model().tlk().loaded() ? neosettings::pathToWx(model().tlk().filename()) : wxString("none"));
-        setModuleStatusText(activeDocument().saveInProgress
-                          ? "Saving..."
-                          : (model().dirty() ? "Modified" : "Saved"), 0);
-        setModuleStatusText(activeDocument().tlkAutoLoadWarning.empty() ? wxString{} : wxui::toWx(activeDocument().tlkAutoLoadWarning), 1);
+
+        wxString primary = activeDocument().saveInProgress
+            ? "Saving..."
+            : (model().dirty() ? "Modified" : "Saved");
+        primary += " - ";
+        primary += wxui::toWx(tabDisplayName(activeDocument()));
+        setModuleStatusText(primary, 0);
+
+        const wxString warning = wxui::toWx(activeDocument().tlkAutoLoadWarning);
+        setModuleStatusText(warning.empty() ? wxString{} : "TLK warning: " + warning, 1);
     }
 
     void refreshUndoMenu() {
@@ -3568,7 +3827,8 @@ private:
 
     void enableInspector(bool enabled) {
         for (wxWindow* window : nodeInspectorWindows()) if (window) window->Enable(enabled);
-        inspectorBook_->Enable(enabled);
+        if (inspectorBook_) inspectorBook_->Enable(enabled);
+        if (singleInspector_) singleInspector_->Enable(enabled);
     }
 
     void enableLinkInspector(bool enabled) {
@@ -3584,7 +3844,7 @@ private:
                 nodeCameraAnimation_, nodeEmotion_, nodeFacialAnim_, nodeCamVidEffectPanel_, nodeFadeType_, nodeFadeColorPicker_,
                 nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodePostProc_, nodeAlienRace_,
                 nodeUnskippable_, nodeRecordVo_, nodeRecordNoVoOverride_, animationList_, animationAddButton_,
-                animationEditButton_, animationDeleteButton_, animationUpButton_, animationDownButton_};
+                animationEditButton_, animationDeleteButton_};
     }
 
     std::vector<wxWindow*> linkInspectorWindows() const {
@@ -3640,8 +3900,7 @@ private:
         clearLinkControls();
         animationValues_.clear();
         if (animationList_) animationList_->DeleteAllItems();
-        for (wxButton* button : {animationAddButton_, animationEditButton_, animationDeleteButton_,
-                                 animationUpButton_, animationDownButton_}) {
+        for (wxButton* button : {animationAddButton_, animationEditButton_, animationDeleteButton_}) {
             if (button) button->Enable(false);
         }
     }
@@ -3660,8 +3919,7 @@ private:
 
         const bool hasNode = hasActiveDocument() && activeDocument().selectedNode.has_value();
         if (!hasNode) {
-            for (wxButton* button : {animationAddButton_, animationEditButton_, animationDeleteButton_,
-                                     animationUpButton_, animationDownButton_}) {
+            for (wxButton* button : {animationAddButton_, animationEditButton_, animationDeleteButton_}) {
                 if (button) button->Enable(false);
             }
             return;
@@ -3696,8 +3954,6 @@ private:
         if (animationAddButton_) animationAddButton_->Enable(!jadeReply);
         if (animationEditButton_) animationEditButton_->Enable(hasSelection);
         if (animationDeleteButton_) animationDeleteButton_->Enable(!jadeReply && hasSelection);
-        if (animationUpButton_) animationUpButton_->Enable(!jadeReply && animationValues_.size() > 1);
-        if (animationDownButton_) animationDownButton_->Enable(!jadeReply && animationValues_.size() > 1);
     }
 
     void materializeRawTreeChildren(const wxTreeItemId& parentItem, const std::string& parentPath) {
@@ -3928,18 +4184,11 @@ private:
         showWindows({linkParamHeading_, linkParamGrid_}, !jade);
         if (linkActive1Label_) linkActive1Label_->SetLabel(jade ? "Condition script:" : "Conditional script 1:");
 
-        if (inspectorBook_ && inspectorBook_->GetPageCount() >= 5) {
-            inspectorBook_->SetPageText(0, jadeEntry ? "Entry Line" : (jade ? "Reply Line" : "Line"));
-            inspectorBook_->SetPageText(1, jadeEntry ? "Scripts / Camera" : (jade ? "Reply Script" : "Scripts / Quest"));
-            inspectorBook_->SetPageText(2, jade ? "Jade Presentation" : "Presentation");
-            inspectorBook_->SetPageText(4, jadeEntry ? "Entry Animations" : (jade ? "Reply Animation" : "Animations"));
-        }
-
-        if (linePage_) { linePage_->Layout(); linePage_->FitInside(); }
-        if (scriptsPage_) { scriptsPage_->Layout(); scriptsPage_->FitInside(); }
-        if (presentationPage_) { presentationPage_->Layout(); presentationPage_->FitInside(); }
-        if (linkPage_) { linkPage_->Layout(); linkPage_->FitInside(); }
-        if (inspectorBook_) inspectorBook_->Layout();
+        setInspectorSectionTitle(0, jadeEntry ? "Entry Line" : (jade ? "Reply Line" : "Line"));
+        setInspectorSectionTitle(1, jadeEntry ? "Scripts / Camera" : (jade ? "Reply Script" : "Scripts / Quest"));
+        setInspectorSectionTitle(2, jade ? "Jade Presentation" : "Presentation");
+        setInspectorSectionTitle(4, jadeEntry ? "Entry Animations" : (jade ? "Reply Animation" : "Animations"));
+        refreshInspectorLayouts();
     }
 
     static std::string lowerAscii(std::string text) {
@@ -3994,12 +4243,15 @@ private:
     void applyDarkMode() {
         if (darkModeItem_) darkModeItem_->Check(darkMode_);
         wxui::applyTheme(this, darkMode_);
-        if (hasActiveDocument() && activeDocument().workspacePage == 0) refreshConversationTree();
+        if (hasActiveDocument() && activeDocument().workspaceView != WorkspaceView::Raw) {
+            refreshConversationTree();
+        }
         Refresh();
     }
 
     void applyFontScale() {
         neoview::applyFontScale(this, fontScale_);
+        refreshInspectorLayouts();
         Layout();
     }
 
@@ -4031,18 +4283,25 @@ private:
     wxMenuItem* undoItem_ = nullptr;
     wxMenuItem* redoItem_ = nullptr;
     wxMenuItem* conversationViewItem_ = nullptr;
+    wxMenuItem* singlePanelViewItem_ = nullptr;
     wxMenuItem* rawViewItem_ = nullptr;
     wxMenuItem* darkModeItem_ = nullptr;
 
     wxAuiNotebook* documentTabs_ = nullptr;
     wxNotebook* workspaceBook_ = nullptr;
-    wxTextCtrl* filePath_ = nullptr;
-    wxStaticText* typeText_ = nullptr;
-    wxStaticText* statsText_ = nullptr;
-    wxTextCtrl* tlkText_ = nullptr;
+    wxPanel* conversationWorkspacePage_ = nullptr;
+    wxPanel* singlePanelWorkspacePage_ = nullptr;
+    wxPanel* semanticWorkspace_ = nullptr;
+    wxBoxSizer* conversationWorkspaceSizer_ = nullptr;
+    wxBoxSizer* singlePanelWorkspaceSizer_ = nullptr;
 
     wxTreeCtrl* conversationTree_ = nullptr;
+    wxPanel* inspectorHost_ = nullptr;
     wxNotebook* inspectorBook_ = nullptr;
+    wxScrolledWindow* singleInspector_ = nullptr;
+    wxBoxSizer* singleInspectorSizer_ = nullptr;
+    std::vector<InspectorSection> inspectorSections_;
+    bool singlePanelActive_ = false;
     wxTextCtrl* findText_ = nullptr;
     std::map<DlgNodeRef, wxTreeItemId> canonicalTreeItems_;
     std::unordered_map<std::string, wxTreeItemId> conversationTreeItemsByKey_;
@@ -4052,11 +4311,6 @@ private:
     std::size_t searchIndex_ = 0;
 
     wxTextCtrl* nodeHeader_ = nullptr;
-    wxScrolledWindow* linePage_ = nullptr;
-    wxScrolledWindow* scriptsPage_ = nullptr;
-    wxScrolledWindow* presentationPage_ = nullptr;
-    wxScrolledWindow* linkPage_ = nullptr;
-
     wxStaticText* nodeSpeakerLabel_ = nullptr;
     wxStaticText* nodeListenerLabel_ = nullptr;
     wxStaticText* nodeStrRefLabel_ = nullptr;
@@ -4204,8 +4458,6 @@ private:
     wxButton* animationAddButton_ = nullptr;
     wxButton* animationEditButton_ = nullptr;
     wxButton* animationDeleteButton_ = nullptr;
-    wxButton* animationUpButton_ = nullptr;
-    wxButton* animationDownButton_ = nullptr;
     std::vector<DlgAnimation> animationValues_;
 
     wxTextCtrl* rawFilter_ = nullptr;
