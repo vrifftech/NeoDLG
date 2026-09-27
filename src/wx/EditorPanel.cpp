@@ -146,6 +146,28 @@ std::string linkConditionSummary(const DlgDocument& document, DlgLinkRef ref) {
     return result;
 }
 
+// Each field occupies a label/value pair in a real grid row. Choose the largest
+// number of pairs whose column minima fit the *viewport*, not a wrapped sizer's
+// cached minimum width. Returning one pair permits narrow inspectors without
+// widening scalar controls or changing their input ranges.
+int inspectorFieldColumns(const std::vector<std::array<int, 2>>& widths,
+                          int availableWidth, int gap, int maximumColumns) {
+    const int limit = std::min(std::max(1, maximumColumns),
+                               static_cast<int>(widths.size()));
+    for (int columns = limit; columns > 1; --columns) {
+        std::vector<std::array<int, 2>> maxima(static_cast<std::size_t>(columns), {0, 0});
+        for (std::size_t i = 0; i < widths.size(); ++i) {
+            auto& slot = maxima[i % static_cast<std::size_t>(columns)];
+            slot[0] = std::max(slot[0], widths[i][0]);
+            slot[1] = std::max(slot[1], widths[i][1]);
+        }
+        int required = (2 * columns - 1) * gap;
+        for (const auto& slot : maxima) required += slot[0] + slot[1];
+        if (required <= availableWidth) return columns;
+    }
+    return 1;
+}
+
 // Conversation keeps its original grid; Single Panel uses content-sized native
 // fields without an unused grid canvas. Switching copies only pending UI text,
 // never applies it to the document or changes numeric parsing/validation.
@@ -1639,7 +1661,8 @@ private:
         Bind(wxEVT_TREE_ITEM_MENU, &NeoDLGPanelImpl::onTreeContextMenu, this, ID_ConversationTree);
         documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onDocumentTabChanged, this);
         documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, &NeoDLGPanelImpl::onDocumentTabCloseRequested, this);
-        workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onWorkspacePageChanged, this);
+        workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onWorkspacePageChanged,
+                             this, ID_Workspace);
     }
 
     void buildConversationPage(wxNotebook* parent) {
@@ -1860,6 +1883,54 @@ private:
         wxWindow* unit = nullptr;
     };
 
+    struct CompactInspectorBand {
+        wxFlexGridSizer* grid;
+        std::vector<InspectorField> fields;
+        std::vector<wxWindow*> shown;
+        int maximumColumns;
+    };
+
+    void refreshCompactInspectorBands() {
+        if (!singlePanelActive_ || !singleInspector_) return;
+        // Account for the section box and its content margins. Never use a
+        // section's minimum width here: FitInside may still be updating it.
+        const int availableWidth = std::max(1,
+            singleInspector_->GetClientSize().x - FromDIP(36));
+        const int gap = FromDIP(8);
+        for (auto& band : compactInspectorBands_) {
+            std::vector<wxWindow*> shown;
+            std::vector<std::array<int, 2>> widths;
+            for (const auto& field : band.fields) {
+                if (!field.control->IsShown() || !field.label->IsShown()) continue;
+                shown.push_back(field.control);
+                int valueWidth = field.control->GetEffectiveMinSize().x;
+                if (field.unit && field.unit->IsShown())
+                    valueWidth += FromDIP(4) + field.unit->GetEffectiveMinSize().x;
+                widths.push_back({field.label->GetEffectiveMinSize().x, valueWidth});
+            }
+            const int columns = inspectorFieldColumns(widths, availableWidth,
+                                                       gap, band.maximumColumns);
+            band.grid->SetCols(2 * columns);
+            if (shown == band.shown) continue;
+            // Hidden dialect-specific fields must not leave empty grid cells.
+            // Delete only the tiny value/unit sizers, never the live controls.
+            band.grid->Clear(false);
+            band.shown = std::move(shown);
+            for (const auto& field : band.fields) {
+                if (!field.control->IsShown() || !field.label->IsShown()) continue;
+                band.grid->Add(field.label, 0, wxALIGN_CENTER_VERTICAL);
+                if (field.unit) {
+                    auto* value = new wxBoxSizer(wxHORIZONTAL);
+                    value->Add(field.control, 0, wxALIGN_CENTER_VERTICAL);
+                    value->Add(field.unit, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(4));
+                    band.grid->Add(value, 0, wxALIGN_CENTER_VERTICAL);
+                } else {
+                    band.grid->Add(field.control, 0, wxALIGN_CENTER_VERTICAL);
+                }
+            }
+        }
+    }
+
     wxWindow* inspectorFieldWindow(wxWindow* control) const {
         if (auto* wrapper = dynamic_cast<ResizableInspectorText*>(control->GetParent()))
             return wrapper;
@@ -1872,11 +1943,28 @@ private:
     void rebuildInspectorForms(bool singlePanel) {
         if (inspectorSections_.size() != 5) return;
         refreshCompactInspectorMetrics();
+        // The following Clear(false) calls destroy the old row sizers.
+        compactInspectorBands_.clear();
         nodeHeader_->Show(singlePanel);
         conversationNodeHeader_->Show(!singlePanel);
         linkDesignerNumberLabel_->SetLabel(singlePanel
             ? "Designer number:" : "Designer number available to script:");
         linkDesignerNumber_->SetToolTip(singlePanel ? "Designer number available to script." : "");
+
+        // Keep long descriptions in Conversation and in tooltips, without
+        // spending a second row on every numeric label in Single Panel.
+        const auto scalarLabel = [singlePanel](wxStaticText* label,
+                                               const wxString& compact,
+                                               const wxString& conversation) {
+            label->SetLabel(singlePanel ? compact : conversation);
+            label->SetToolTip(singlePanel ? conversation : wxString{});
+        };
+        scalarLabel(nodePlotXpLabel_, "Plot XP %:", "Plot XP percentage:");
+        scalarLabel(nodeCamHeightOffsetLabel_, "Camera offset:", "Camera height offset:");
+        scalarLabel(nodeTarHeightOffsetLabel_, "Target offset:", "Target height offset:");
+        scalarLabel(nodeCameraAnimationLabel_, "Camera anim:", "Camera animation:");
+        scalarLabel(nodePostProcLabel_, "Post-process:", "Post-process node:");
+        scalarLabel(nodeAlienRaceLabel_, "Alien-race:", "Alien-race node:");
 
         const int pad = singlePanel ? FromDIP(4) : 10;
         const auto newForm = [&]() {
@@ -1906,20 +1994,14 @@ private:
         const auto addForm = [&](wxSizer* root, wxSizer* form, int stretch = 0) {
             root->Add(form, stretch, wxEXPAND | wxALL, pad);
         };
-        const auto band = [&](wxSizer* root, std::initializer_list<InspectorField> fields) {
-            auto* wrap = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
-            for (const auto& field : fields) {
-                auto* group = new wxBoxSizer(wxVERTICAL);
-                group->Add(field.label, 0, wxBOTTOM, FromDIP(2));
-                auto* value = new wxBoxSizer(wxHORIZONTAL);
-                // No wxEXPAND on the scalar: a long label must not stretch it.
-                value->Add(field.control, 0, wxALIGN_CENTER_VERTICAL);
-                if (field.unit) value->Add(field.unit, 0,
-                    wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(4));
-                group->Add(value, 0);
-                wrap->Add(group, 0, wxRIGHT | wxBOTTOM, FromDIP(8));
-            }
-            root->Add(wrap, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, pad);
+        const auto band = [&](wxSizer* root, std::initializer_list<InspectorField> fields,
+                              int maximumColumns = 2) {
+            auto* grid = new wxFlexGridSizer(2, FromDIP(3), FromDIP(8));
+            compactInspectorBands_.push_back({grid, fields, {}, maximumColumns});
+            // Inline label/value pairs share actual grid rows. Do not put a
+            // vertical label-over-control sizer into a wxWrapSizer: wrapping
+            // each pair separately can consume as much height as the old form.
+            root->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, pad);
         };
         const auto checks = [&](wxSizer* root, std::initializer_list<wxWindow*> fields) {
             auto* wrap = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
@@ -1971,7 +2053,9 @@ private:
                     {nodePlotXpLabel_, nodePlotXp_}};
                 if (singlePanel) {
                     addForm(root, form);
-                    band(root, plot);
+                    band(root, {{nodePlotIndexLabel_, nodePlotIndex_},
+                                {nodePlotXpLabel_, nodePlotXp_},
+                                {nodeQuestEntryLabel_, nodeQuestEntry_}}, 3);
                     form = newForm();
                 } else rows(form, plot);
                 rows(form, {{nodeActionStrALabel_, nodeActionStrA_}, {nodeActionStrBLabel_, nodeActionStrB_}});
@@ -1989,9 +2073,12 @@ private:
                 row(form, {nodeCameraAngleLabel_, nodeCameraAngle_});
                 if (singlePanel) {
                     addForm(root, form);
-                    band(root, {{nodeCameraIdLabel_, nodeCameraId_}, {nodeCameraAnimationLabel_, nodeCameraAnimation_}});
-                    band(root, {{nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
-                                {nodeTarHeightOffsetLabel_, nodeTarHeightOffset_}});
+                    band(root, {{nodeCameraIdLabel_, nodeCameraId_},
+                                {nodeCameraAnimationLabel_, nodeCameraAnimation_},
+                                {nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
+                                {nodeTarHeightOffsetLabel_, nodeTarHeightOffset_},
+                                {nodeEmotionLabel_, nodeEmotion_},
+                                {nodeFacialAnimLabel_, nodeFacialAnim_}});
                     form = newForm();
                 } else rows(form, {{nodeCameraIdLabel_, nodeCameraId_},
                                    {nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
@@ -2004,7 +2091,6 @@ private:
                 form->Add(fov, 1, wxEXPAND);
                 if (singlePanel) {
                     addForm(root, form);
-                    band(root, {{nodeEmotionLabel_, nodeEmotion_}, {nodeFacialAnimLabel_, nodeFacialAnim_}});
                     form = newForm();
                 } else rows(form, {{nodeCameraAnimationLabel_, nodeCameraAnimation_},
                                    {nodeEmotionLabel_, nodeEmotion_}, {nodeFacialAnimLabel_, nodeFacialAnim_}});
@@ -2026,8 +2112,10 @@ private:
                     {nodePostProcLabel_, nodePostProc_}, {nodeAlienRaceLabel_, nodeAlienRace_}};
                 if (singlePanel) {
                     addForm(root, form);
-                    band(root, fade);
-                    band(root, nodes);
+                    band(root, {{nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
+                                {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_},
+                                {nodePostProcLabel_, nodePostProc_},
+                                {nodeAlienRaceLabel_, nodeAlienRace_}});
                     checks(root, {nodeUnskippable_, nodeRecordVo_, nodeRecordNoVoOverride_});
                 } else {
                     rows(form, fade);
@@ -2153,6 +2241,7 @@ private:
         // Establish the real viewport first; FitInside must not measure a
         // hidden or pre-splitter size and make that stale height persistent.
         if (inspectorHost_) inspectorHost_->Layout();
+        refreshCompactInspectorBands();
         const auto refit = [](wxScrolledWindow* scroll) {
             if (!scroll) return;
             const wxPoint previous = scroll->GetViewStart();
@@ -4063,6 +4152,13 @@ private:
     }
 
     void onWorkspacePageChanged(wxBookCtrlEvent& event) {
+        // Notebook selection events propagate from nested notebooks. An
+        // inspector subtab (e.g. Scripts / Quest == 1) is NOT a workspace page
+        // (Single Panel == 1). Ignore it before touching view or document state.
+        if (event.GetEventObject() != workspaceBook_) {
+            event.Skip();
+            return;
+        }
         switch (event.GetSelection()) {
         case 0:
             setWorkspaceView(WorkspaceView::Conversation);
@@ -4977,6 +5073,7 @@ private:
     wxScrolledWindow* singleInspector_ = nullptr;
     wxBoxSizer* singleInspectorSizer_ = nullptr;
     std::vector<InspectorSection> inspectorSections_;
+    std::vector<CompactInspectorBand> compactInspectorBands_;
     bool singlePanelActive_ = false;
     bool inspectorLayoutRefreshPending_ = false;
     bool inspectorLayoutRefreshInProgress_ = false;
