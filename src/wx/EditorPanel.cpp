@@ -23,6 +23,7 @@
 #include <wx/clrpicker.h>
 #include <wx/choice.h>
 #include <wx/combobox.h>
+#include <wx/dcbuffer.h>
 #include <wx/clipbrd.h>
 #include <wx/icon.h>
 #include <wx/iconbndl.h>
@@ -204,6 +205,149 @@ public:
 
 private:
     std::array<std::array<wxTextCtrl*, 2>, 5> cells_{};
+};
+
+
+// Forward width constraints across the panel boundary. Otherwise a wrap sizer
+// inside a section can keep a cached one-row height after the inspector narrows.
+class InspectorContentPanel final : public wxPanel {
+public:
+    explicit InspectorContentPanel(wxWindow* parent) : wxPanel(parent, wxID_ANY) {}
+
+    bool InformFirstDirection(int direction, int size, int availableOtherDir) override {
+        if (direction != wxHORIZONTAL || size <= 0 || !GetSizer()) {
+            return wxPanel::InformFirstDirection(direction, size, availableOtherDir);
+        }
+        const int clientWidth = std::max(1, size - GetWindowBorderSize().x);
+        const bool changed = GetSizer()->InformFirstDirection(
+            direction, clientWidth, availableOtherDir);
+        InvalidateBestSize();
+        return changed;
+    }
+};
+
+// A real multiline text control with a small, separate resize grip. Do not put
+// children on a native wxTextCtrl: that is not portable between GTK/MSW/Cocoa.
+// Only the height is user-sized; the field width follows the inspector.
+class ResizableInspectorText final : public wxPanel {
+public:
+    ResizableInspectorText(wxWindow* parent, const wxString& name, long style,
+                           std::function<void()> relayout)
+        : wxPanel(parent, wxID_ANY), relayout_(std::move(relayout)) {
+        SetName(name + " editor");
+        text_ = new wxTextCtrl(this, wxID_ANY, wxEmptyString, wxDefaultPosition,
+                               wxDefaultSize, style | wxTE_MULTILINE);
+        text_->SetName(name);
+        grip_ = new wxWindow(this, wxID_ANY, wxDefaultPosition, wxDefaultSize,
+                             wxBORDER_NONE | wxWANTS_CHARS);
+        grip_->SetName(name + " resize grip");
+        grip_->SetToolTip("Drag up/down to resize. Double-click to reset. "
+                          "Arrow keys resize; Home resets.");
+        grip_->SetCursor(wxCursor(wxCURSOR_SIZENS));
+        grip_->SetBackgroundStyle(wxBG_STYLE_PAINT);
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        row->Add(text_, 1, wxEXPAND);
+        row->Add(grip_, 0, wxALIGN_BOTTOM | wxLEFT, FromDIP(2));
+        SetSizer(row);
+        RefreshMetrics();
+
+        grip_->Bind(wxEVT_PAINT, [this](wxPaintEvent&) {
+            wxAutoBufferedPaintDC dc(grip_);
+            dc.SetBackground(wxBrush(GetBackgroundColour()));
+            dc.Clear();
+            dc.SetPen(wxPen(GetForegroundColour()));
+            const wxSize size = grip_->GetClientSize();
+            const int right = size.x - FromDIP(2);
+            const int bottom = size.y - FromDIP(2);
+            for (int length : {3, 6, 9}) {
+                const int n = FromDIP(length);
+                dc.DrawLine(right - n, bottom, right, bottom - n);
+            }
+            if (grip_->HasFocus()) {
+                dc.SetBrush(*wxTRANSPARENT_BRUSH);
+                dc.DrawRectangle(0, 0, std::max(1, size.x - 1), std::max(1, size.y - 1));
+            }
+        });
+        const auto focusChanged = [this](wxFocusEvent& event) {
+            grip_->Refresh();
+            event.Skip();
+        };
+        grip_->Bind(wxEVT_SET_FOCUS, focusChanged);
+        grip_->Bind(wxEVT_KILL_FOCUS, focusChanged);
+        grip_->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent&) {
+            grip_->SetFocus();
+            dragOriginY_ = wxGetMousePosition().y;
+            dragExtraHeightDip_ = extraHeightDip_;
+            dragging_ = true;
+            if (!grip_->HasCapture()) grip_->CaptureMouse();
+        });
+        grip_->Bind(wxEVT_MOTION, [this](wxMouseEvent& event) {
+            if (!dragging_) { event.Skip(); return; }
+            if (!event.LeftIsDown()) { endDrag(); return; }
+            // Screen coordinates stay stable when FitInside moves the field.
+            setExtraHeight(dragExtraHeightDip_ + ToDIP(wxGetMousePosition().y - dragOriginY_));
+        });
+        grip_->Bind(wxEVT_LEFT_UP, [this](wxMouseEvent&) { endDrag(); });
+        grip_->Bind(wxEVT_MOUSE_CAPTURE_LOST, [this](wxMouseCaptureLostEvent&) {
+            dragging_ = false;
+        });
+        grip_->Bind(wxEVT_LEFT_DCLICK, [this](wxMouseEvent&) {
+            endDrag();
+            setExtraHeight(0);
+        });
+        grip_->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) {
+            const int line = std::max(1, ToDIP(text_->GetCharHeight()));
+            switch (event.GetKeyCode()) {
+                case WXK_UP: setExtraHeight(extraHeightDip_ - line); break;
+                case WXK_DOWN: setExtraHeight(extraHeightDip_ + line); break;
+                case WXK_PAGEUP: setExtraHeight(extraHeightDip_ - 4 * line); break;
+                case WXK_PAGEDOWN: setExtraHeight(extraHeightDip_ + 4 * line); break;
+                case WXK_HOME: setExtraHeight(0); break;
+                case WXK_ESCAPE: endDrag(); break;
+                case WXK_TAB:
+                    grip_->Navigate(event.ShiftDown() ? wxNavigationKeyEvent::IsBackward
+                                                     : wxNavigationKeyEvent::IsForward);
+                    break;
+                default: event.Skip(); break;
+            }
+        });
+    }
+
+    ~ResizableInspectorText() override { endDrag(); }
+    wxTextCtrl* Text() const { return text_; }
+
+    void RefreshMetrics() {
+        // One text row by default. Keep the user's extra height across node,
+        // view and font changes; layout refreshes must not collapse the editor.
+        const int height = std::max(1, text_->GetCharHeight()) + FromDIP(8 + extraHeightDip_);
+        text_->SetMinSize(wxSize(FromDIP(80), height));
+        grip_->SetMinSize(FromDIP(wxSize(12, 12)));
+        SetMinSize(wxSize(FromDIP(94), height));
+        InvalidateBestSize();
+        Layout();
+        grip_->Refresh();
+    }
+
+private:
+    void endDrag() {
+        dragging_ = false;
+        if (grip_ && grip_->HasCapture()) grip_->ReleaseMouse();
+    }
+    void setExtraHeight(int dip) {
+        const int next = std::clamp(dip, 0, 1600);
+        if (next == extraHeightDip_) return;
+        extraHeightDip_ = next;
+        RefreshMetrics();
+        if (relayout_) relayout_();
+    }
+
+    wxTextCtrl* text_ = nullptr;
+    wxWindow* grip_ = nullptr;
+    std::function<void()> relayout_;
+    int extraHeightDip_ = 0;
+    int dragExtraHeightDip_ = 0;
+    int dragOriginY_ = 0;
+    bool dragging_ = false;
 };
 
 wxTextCtrl* addTextField(wxWindow* parent,
@@ -1467,7 +1611,16 @@ private:
         inspectorBook_ = new wxNotebook(inspectorHost_, wxID_ANY);
         singleInspector_ = new wxScrolledWindow(inspectorHost_, wxID_ANY, wxDefaultPosition,
                                                  wxDefaultSize, wxVSCROLL);
+        singleInspector_->SetName("NeoDLG single panel inspector");
+        singleInspector_->SetMinSize(FromDIP(wxSize(160, 80)));
         singleInspector_->SetScrollRate(0, FromDIP(10));
+        singleInspector_->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+            event.Skip();
+            if (singleInspector_->GetClientSize() != inspectorClientSize_) {
+                inspectorClientSize_ = singleInspector_->GetClientSize();
+                queueInspectorLayoutRefresh();
+            }
+        });
         singleInspectorSizer_ = new wxBoxSizer(wxVERTICAL);
         singleInspector_->SetSizer(singleInspectorSizer_);
         singleInspector_->Hide();
@@ -1489,6 +1642,7 @@ private:
         conversationWorkspaceSizer_->Add(page, 1, wxEXPAND);
         parent->AddPage(conversationWorkspacePage_, "Conversation", true);
         parent->AddPage(singlePanelWorkspacePage_, "Single Panel", false);
+        bindInspectorWheelForwarding(inspectorHost_);
     }
 
     void setSemanticWorkspaceHost(bool singlePanel) {
@@ -1528,20 +1682,25 @@ private:
                                   wxBoxSizer*& root) {
         auto* tabPage = new wxScrolledWindow(book, wxID_ANY, wxDefaultPosition,
                                               wxDefaultSize, wxVSCROLL);
+        tabPage->SetMinSize(FromDIP(wxSize(160, 80)));
         tabPage->SetScrollRate(0, FromDIP(10));
+        tabPage->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+            event.Skip();
+            if (!inspectorLayoutRefreshInProgress_) queueInspectorLayoutRefresh();
+        });
         auto* tabSizer = new wxBoxSizer(wxVERTICAL);
-        auto* content = new wxPanel(tabPage);
+        auto* content = new InspectorContentPanel(tabPage);
         root = new wxBoxSizer(wxVERTICAL);
         content->SetSizer(root);
         tabSizer->Add(content, 1, wxEXPAND);
         tabPage->SetSizer(tabSizer);
         book->AddPage(tabPage, title, false);
 
-        auto* singleHost = new wxPanel(singleInspector_);
+        auto* singleHost = new InspectorContentPanel(singleInspector_);
         auto* singleSizer = new wxStaticBoxSizer(wxVERTICAL, singleHost, title);
         singleHost->SetSizer(singleSizer);
         singleInspectorSizer_->Add(singleHost, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP,
-                                   FromDIP(6));
+                                   FromDIP(3));
 
         inspectorSections_.push_back({tabPage, tabSizer, content, singleHost, singleSizer});
         return content;
@@ -1559,16 +1718,12 @@ private:
     }
 
     void refreshCompactInspectorMetrics() {
-        // Text rows, not fixed pixel heights, so DPI and font scaling still work.
-        const auto sizeText = [](wxTextCtrl* field, int rows) {
-            if (!field) return;
-            const int height = rows * std::max(1, field->GetCharHeight()) + field->FromDIP(12);
-            field->SetMinSize(wxSize(-1, height));
-        };
-        sizeText(nodeLocalText_, 3);
-        sizeText(nodeResolvedText_, 3);
-        sizeText(nodeComment_, 2);
-        sizeText(linkComment_, 2);
+        for (auto* editor : resizableInspectorText_) {
+            // Dialect visibility is still applied to the original text control.
+            // Hide its wrapper and grip too, without reserving an empty form row.
+            editor->Show(editor->Text()->IsShown());
+            editor->RefreshMetrics();
+        }
         for (auto* field : compactNumericFields_) {
             const int width = field->GetTextExtent("-2147483648").x + field->FromDIP(20);
             field->SetMinSize(wxSize(std::max(field->FromDIP(100), width), -1));
@@ -1603,7 +1758,7 @@ private:
     }
 
     wxFlexGridSizer* appendInspectorForm(wxPanel* page, wxBoxSizer* root) {
-        auto* form = new wxFlexGridSizer(2, page->FromDIP(5), page->FromDIP(8));
+        auto* form = new wxFlexGridSizer(2, page->FromDIP(3), page->FromDIP(6));
         form->AddGrowableCol(1, 1);
         root->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(6));
         return form;
@@ -1617,21 +1772,108 @@ private:
         nodeHeader_->SetToolTip(text);
     }
 
+    wxTextCtrl* addResizableInspectorText(wxPanel* page, wxFlexGridSizer* form,
+                                            const wxString& label, const wxString& name,
+                                            wxStaticText** labelOut, long style = 0) {
+        auto* labelControl = new wxStaticText(page, wxID_ANY, label);
+        if (labelOut) *labelOut = labelControl;
+        form->Add(labelControl, 0, wxALIGN_TOP | wxRIGHT | wxTOP, FromDIP(3));
+        auto* editor = new ResizableInspectorText(page, name, style,
+                                                  [this]() { queueInspectorLayoutRefresh(); });
+        form->Add(editor, 0, wxEXPAND);
+        resizableInspectorText_.push_back(editor);
+        return editor->Text();
+    }
+
+    void queueInspectorLayoutRefresh() {
+        if (IsBeingDeleted() || inspectorLayoutRefreshPending_) return;
+        inspectorLayoutRefreshPending_ = true;
+        // Coalesce live sash/field resizing. Posting on this handler also drops
+        // the callback if the editor is destroyed before it can run.
+        CallAfter([this]() {
+            inspectorLayoutRefreshPending_ = false;
+            if (!IsBeingDeleted()) refreshInspectorLayouts();
+        });
+    }
+
+    void bindInspectorWheelForwarding(wxWindow* window) {
+        if (!window) return;
+        const auto* text = dynamic_cast<wxTextCtrl*>(window);
+        const bool background = dynamic_cast<wxPanel*>(window) ||
+                                dynamic_cast<wxStaticText*>(window) ||
+                                dynamic_cast<wxStaticBox*>(window);
+        // Leave multiline editors and lists with their own native scrolling.
+        // Scroll margins/labels/single-line fields using their CURRENT parent,
+        // since the same controls move between Conversation and Single Panel.
+        if (!dynamic_cast<wxScrolledWindow*>(window) &&
+            (background || (text && !text->HasFlag(wxTE_MULTILINE)))) {
+            window->Bind(wxEVT_MOUSEWHEEL, [this, window](wxMouseEvent& event) {
+                if (event.GetWheelAxis() != wxMOUSE_WHEEL_VERTICAL ||
+                    event.ControlDown() || event.CmdDown() || event.ShiftDown() ||
+                    event.GetWheelDelta() <= 0) {
+                    event.Skip();
+                    return;
+                }
+                wxScrolledWindow* target = nullptr;
+                for (auto* parent = window->GetParent(); parent; parent = parent->GetParent()) {
+                    target = dynamic_cast<wxScrolledWindow*>(parent);
+                    if (target) break;
+                }
+                if (!target || !target->IsEnabled()) { event.Skip(); return; }
+                if (wheelTarget_ != target) { wheelTarget_ = target; wheelRotation_ = 0; }
+                wheelRotation_ += event.GetWheelRotation();
+                const int turns = wheelRotation_ / event.GetWheelDelta();
+                wheelRotation_ %= event.GetWheelDelta();
+                if (!turns) return;
+                int unitY = 0;
+                target->GetScrollPixelsPerUnit(nullptr, &unitY);
+                if (unitY <= 0) { event.Skip(); return; }
+                const int lines = event.IsPageScroll()
+                    ? std::max(1, target->GetClientSize().y / unitY)
+                    : std::max(1, event.GetLinesPerAction());
+                const int y = target->GetViewStart().y;
+                target->Scroll(-1, std::max(0, y - turns * lines));
+            });
+        }
+        for (auto* child : window->GetChildren()) bindInspectorWheelForwarding(child);
+    }
+
     void refreshInspectorLayouts() {
+        if (inspectorLayoutRefreshInProgress_) return;
+        inspectorLayoutRefreshInProgress_ = true;
         refreshCompactInspectorMetrics();
-        for (auto& section : inspectorSections_) {
-            if (section.content) section.content->Layout();
-            if (section.tabPage) {
-                section.tabPage->Layout();
-                section.tabPage->FitInside();
-            }
-            if (section.singleHost) section.singleHost->Layout();
-        }
-        if (singleInspector_) {
-            singleInspector_->Layout();
-            singleInspector_->FitInside();
-        }
+        // Establish the real viewport first; FitInside must not measure a
+        // hidden or pre-splitter size and make that stale height persistent.
         if (inspectorHost_) inspectorHost_->Layout();
+        const auto refit = [](wxScrolledWindow* scroll) {
+            if (!scroll) return;
+            const wxPoint previous = scroll->GetViewStart();
+            scroll->InvalidateBestSize();
+            scroll->FitInside();
+            scroll->Layout();
+            // Scroll() clamps naturally after shrinking; don't jump to the top
+            // on every selection, font change or resize-grip motion.
+            scroll->Scroll(previous);
+        };
+        // First propagate widths into wrapped rows, then recompute their
+        // heights. Invalidate panel caches from the content outwards because
+        // Layout() alone doesn't invalidate a wxWindow's cached best size.
+        for (int pass = 0; pass < 2; ++pass) {
+            for (auto& section : inspectorSections_) {
+                if (section.content) {
+                    section.content->InvalidateBestSize();
+                    section.content->Layout();
+                }
+                if (section.singleSizer) section.singleSizer->GetStaticBox()->InvalidateBestSize();
+                if (section.singleHost) {
+                    section.singleHost->InvalidateBestSize();
+                    section.singleHost->Layout();
+                }
+                if (!singlePanelActive_) refit(section.tabPage);
+            }
+            if (singlePanelActive_) refit(singleInspector_);
+        }
+        inspectorLayoutRefreshInProgress_ = false;
     }
 
     void setSinglePanelLayout(bool singlePanel) {
@@ -1663,7 +1905,7 @@ private:
             if (singlePanel) {
                 wxWindow* const target = section.singleSizer->GetStaticBox();
                 section.content->Reparent(target);
-                section.singleSizer->Add(section.content, 0, wxEXPAND | wxALL, FromDIP(4));
+                section.singleSizer->Add(section.content, 0, wxEXPAND | wxALL, FromDIP(2));
             } else {
                 section.content->Reparent(section.tabPage);
                 section.tabSizer->Add(section.content, 1, wxEXPAND);
@@ -1687,9 +1929,9 @@ private:
         wxFont bold = nodeHeader_->GetFont();
         bold.SetWeight(wxFONTWEIGHT_BOLD);
         nodeHeader_->SetFont(bold);
-        root->Add(nodeHeader_, 0, wxEXPAND | wxALL, FromDIP(6));
+        root->Add(nodeHeader_, 0, wxEXPAND | wxALL, FromDIP(3));
 
-        auto* form = new wxFlexGridSizer(2, FromDIP(5), FromDIP(8));
+        auto* form = new wxFlexGridSizer(2, FromDIP(3), FromDIP(6));
         form->AddGrowableCol(1, 1);
         nodeSpeakerLabel_ = new wxStaticText(page, wxID_ANY, "Speaker:");
         form->Add(nodeSpeakerLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -1703,19 +1945,18 @@ private:
 
         nodeStrRef_ = addTextField(page, form, "Text StrRef:", 0, wxDefaultSize, &nodeStrRefLabel_);
         nodeStringType_ = addTextField(page, form, "Jade string type:", 0, wxDefaultSize, &nodeStringTypeLabel_);
-        nodeLocalText_ = addTextField(page, form, "Local text:", wxTE_MULTILINE,
-                                      wxDefaultSize, &nodeLocalTextLabel_);
-        nodeLocalText_->SetName("NeoDLG local text");
-        nodeResolvedText_ = addTextField(page, form, "Resolved TLK text:", wxTE_MULTILINE | wxTE_READONLY,
-                                         wxDefaultSize, &nodeResolvedTextLabel_);
+        nodeLocalText_ = addResizableInspectorText(page, form, "Local text:",
+            "NeoDLG local text", &nodeLocalTextLabel_);
+        nodeResolvedText_ = addResizableInspectorText(page, form, "Resolved TLK text:",
+            "NeoDLG resolved TLK text", &nodeResolvedTextLabel_, wxTE_READONLY);
         nodeVo_ = addTextField(page, form, "Voice-over resref:", 0, wxDefaultSize, &nodeVoLabel_);
         nodeJadeSkippable_ = addCheckField(page, form, "Entry can be skipped", &nodeJadeSkippablePlaceholder_);
         nodeJadeSkippable_->SetToolTip(
             "Jade Empire Entry Skippable field. The runtime default is enabled when the field is absent.");
-        nodeComment_ = addTextField(page, form, "Designer comment:", wxTE_MULTILINE,
-                                    wxDefaultSize, &nodeCommentLabel_);
-        root->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(6));
-        root->Add(new wxButton(page, ID_ApplyNode, "Apply Line Changes"), 0, wxALIGN_RIGHT | wxALL, FromDIP(6));
+        nodeComment_ = addResizableInspectorText(page, form, "Designer comment:",
+            "NeoDLG designer comment", &nodeCommentLabel_);
+        root->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(3));
+        root->Add(new wxButton(page, ID_ApplyNode, "Apply Line Changes"), 0, wxALIGN_RIGHT | wxALL, FromDIP(3));
     }
 
     void buildScriptsPage(wxNotebook* book) {
@@ -2069,8 +2310,8 @@ private:
         linkLogic_ = addTextField(page, form, "Logic mode:", 0, wxDefaultSize, &linkLogicLabel_);
         linkParamStrA_ = addTextField(page, form, "Conditional string A:", 0, wxDefaultSize, &linkParamStrALabel_);
         linkParamStrB_ = addTextField(page, form, "Conditional string B:", 0, wxDefaultSize, &linkParamStrBLabel_);
-        linkComment_ = addTextField(page, form, "Link comment:", wxTE_MULTILINE,
-                                    wxDefaultSize, &linkCommentLabel_);
+        linkComment_ = addResizableInspectorText(page, form, "Link comment:",
+            "NeoDLG link comment", &linkCommentLabel_);
         linkDesignerNumber_ = addTextField(page, form, "Designer number available to script:", 0,
                                            wxDefaultSize, &linkDesignerNumberLabel_);
         linkNot1_ = addCheckField(page, form, "Negate conditional 1", &linkNot1Placeholder_);
@@ -3791,6 +4032,7 @@ private:
             setNodeHeader("Select a dialogue node.");
             linkHeader_->SetLabel("Select a linked node to edit its conditions.");
             clearInspectorControls();
+            enableInspector(false);
             return;
         }
 
@@ -3942,12 +4184,17 @@ private:
 
     void enableInspector(bool enabled) {
         for (wxWindow* window : nodeInspectorWindows()) if (window) window->Enable(enabled);
-        if (inspectorBook_) inspectorBook_->Enable(enabled);
-        if (singleInspector_) singleInspector_->Enable(enabled);
+        // Navigation/scrollbars stay enabled even with no selected node. Only
+        // data entry and Apply actions depend on the selection.
+        for (int id : {ID_ApplyNode, ID_ApplyScripts, ID_ApplyPresentation}) {
+            if (auto* button = FindWindow(id)) button->Enable(enabled);
+        }
+        if (!enabled) enableLinkInspector(false);
     }
 
     void enableLinkInspector(bool enabled) {
         for (wxWindow* window : linkInspectorWindows()) if (window) window->Enable(enabled);
+        if (auto* button = FindWindow(ID_ApplyLink)) button->Enable(enabled);
     }
 
     std::vector<wxWindow*> nodeInspectorWindows() const {
@@ -4417,6 +4664,12 @@ private:
     wxBoxSizer* singleInspectorSizer_ = nullptr;
     std::vector<InspectorSection> inspectorSections_;
     bool singlePanelActive_ = false;
+    bool inspectorLayoutRefreshPending_ = false;
+    bool inspectorLayoutRefreshInProgress_ = false;
+    wxSize inspectorClientSize_;
+    wxScrolledWindow* wheelTarget_ = nullptr;
+    int wheelRotation_ = 0;
+    std::vector<ResizableInspectorText*> resizableInspectorText_;
     wxTextCtrl* findText_ = nullptr;
     std::map<DlgNodeRef, wxTreeItemId> canonicalTreeItems_;
     std::unordered_map<std::string, wxTreeItemId> conversationTreeItemsByKey_;
