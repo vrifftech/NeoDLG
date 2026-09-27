@@ -1,4 +1,5 @@
 #include "neodlg/model/DlgDocument.hpp"
+#include "neodlg/model/DlgFieldRemoval.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -574,6 +575,8 @@ void DlgDocument::setNodeField(DlgNodeRef ref,
                                const std::string& label,
                                std::uint32_t fieldType,
                                const std::string& value) {
+    if (isRetiredDlgField(label))
+        throw std::invalid_argument("This field has been removed from NeoDLG: " + label);
     GffStruct* structure = node(ref);
     if (!structure) throw std::out_of_range("Dialogue node does not exist.");
     setField(*structure, label, fieldType, value);
@@ -601,6 +604,8 @@ void DlgDocument::setLinkField(DlgLinkRef ref,
                                const std::string& label,
                                std::uint32_t fieldType,
                                const std::string& value) {
+    if (isRetiredDlgField(label))
+        throw std::invalid_argument("This field has been removed from NeoDLG: " + label);
     GffStruct* structure = link(ref);
     if (!structure) throw std::out_of_range("Dialogue link does not exist.");
     setField(*structure, label, fieldType, value);
@@ -627,6 +632,8 @@ std::string DlgDocument::rootField(const std::string& label) const {
 void DlgDocument::setRootField(const std::string& label,
                                std::uint32_t fieldType,
                                const std::string& value) {
+    if (isRetiredDlgField(label))
+        throw std::invalid_argument("This field has been removed from NeoDLG: " + label);
     GffStruct* structure = root();
     if (!structure) throw std::runtime_error("DLG root structure is unavailable.");
     setField(*structure, label, fieldType, value);
@@ -702,11 +709,8 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultNode(DlgNodeKind kind) const 
         result->AddField(std::make_unique<GffExoStringField>("ActionParamStrA", ""));
         result->AddField(std::make_unique<GffExoStringField>("ActionParamStrB", ""));
         result->AddField(std::make_unique<GffIntField>("NodeUnskippable", 0));
-        result->AddField(std::make_unique<GffIntField>("PostProcNode", 0));
         result->AddField(std::make_unique<GffIntField>("AlienRaceNode", 0));
         result->AddField(std::make_unique<GffIntField>("Emotion", 0));
-        result->AddField(std::make_unique<GffIntField>("RecordVO", 0));
-        result->AddField(std::make_unique<GffIntField>("RecordNoVOOverri", 0));
         result->AddField(std::make_unique<GffIntField>("FacialAnim", 0));
         result->AddField(std::make_unique<GffIntField>("CameraID", 0));
         result->AddField(std::make_unique<GffIntField>("CamVidEffect", -1));
@@ -719,6 +723,7 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultNode(DlgNodeKind kind) const 
 }
 
 void DlgDocument::clearClonedNode(GffStruct& structure, DlgNodeKind kind) const {
+    removeRetiredDlgFields(structure);
     const bool jade = dialect() == DlgDialect::JadeEmpire || flavor() == DlgFlavor::JadeEmpire;
     clearList(structure, childListLabel(kind));
 
@@ -774,7 +779,7 @@ void DlgDocument::clearClonedNode(GffStruct& structure, DlgNodeKind kind) const 
         setIntegralIfPresent(structure, "ActionParam" + std::to_string(i), 0);
         setIntegralIfPresent(structure, "ActionParam" + std::to_string(i) + "b", 0);
     }
-    for (const char* label : {"NodeUnskippable", "PostProcNode", "AlienRaceNode", "Emotion", "RecordVO", "RecordNoVOOverri",
+    for (const char* label : {"NodeUnskippable", "AlienRaceNode", "Emotion",
                               "RecordNoOverri", "FacialAnim", "CameraID", "CameraAngle", "FadeType", "WaitFlags", "SoundExists",
                               "VOTextChanged", "Changed"}) {
         setIntegralIfPresent(structure, label, 0);
@@ -797,7 +802,6 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultLink(DlgLinkOwner owner, std:
     }
 
     result->AddField(std::make_unique<GffResRefField>("Active", ""));
-    result->AddField(std::make_unique<GffByteField>("IsChild", 0));
     if (flavor() == DlgFlavor::Kotor2) {
         result->AddField(std::make_unique<GffResRefField>("Active2", ""));
         for (int i = 1; i <= 5; ++i) {
@@ -900,6 +904,7 @@ DlgNodeRef DlgDocument::duplicateNode(DlgNodeRef source) {
     auto* clonedStruct = dynamic_cast<GffStruct*>(clonedField.release());
     if (!clonedStruct) throw std::runtime_error("Unable to duplicate the dialogue node.");
     std::unique_ptr<GffStruct> clone(clonedStruct);
+    removeRetiredDlgFields(*clone);
     clone->typeid_ = static_cast<std::uint32_t>(list->count());
     assignFreshNodeId(*clone);
     const DlgNodeRef result{source.kind, list->count()};
@@ -940,6 +945,7 @@ void DlgDocument::copyLinkProperties(DlgLinkRef source, DlgLinkRef destination) 
     auto* clonedStruct = dynamic_cast<GffStruct*>(clonedField.release());
     if (!clonedStruct) throw std::runtime_error("Unable to duplicate dialogue link properties.");
     std::unique_ptr<GffStruct> clone(clonedStruct);
+    removeRetiredDlgFields(*clone);
     clone->typeid_ = static_cast<std::uint32_t>(destination.position);
     setField(*clone, "Index", FIELD_TYPE_DWORD, std::to_string(destinationIndex));
     destinationList->allStructs()[destination.position] = std::move(clone);

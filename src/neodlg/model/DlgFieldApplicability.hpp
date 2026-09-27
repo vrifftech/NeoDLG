@@ -1,6 +1,7 @@
 #pragma once
 
 #include "DlgDocument.hpp"
+#include "DlgFieldRemoval.hpp"
 
 #include <array>
 #include <optional>
@@ -35,13 +36,9 @@ inline bool isK2LinkInspectorField(std::string_view label) {
 }
 
 inline bool isRemovedInspectorField(std::string_view label) {
-    // GFF3 labels are at most 16 bytes. Preserve the longer user-facing spelling
-    // too; neither spelling is deleted or normalized by this display policy.
-    for (const auto name : {"LinkComment", "IsChild", "PostProcNode", "RecordVO",
-                            "RecordNoVOOverri", "RecordNoVOOverride"}) {
-        if (label == name) return true;
-    }
-    return false;
+    // Defensive projection for raw/host-provided models before normalization.
+    // The document load/import/save boundaries now DELETE these fields too.
+    return isRetiredDlgField(label);
 }
 
 inline bool hasK2LinkInspectorFields(const GffStruct* link) {

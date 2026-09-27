@@ -1407,6 +1407,7 @@ public:
         if (activateResource(input.identity)) return true;
         auto candidate = std::make_unique<GffModel>();
         neoshared::loadGffResource(input, candidate->gff(), "DLG ");
+        removeRetiredDlgFields(*candidate);
         // Parse before creating/replacing a tab, so a failed load leaves the UI intact.
         ensureTabForOpen();
         auto& document = activeDocument();
@@ -2015,7 +2016,6 @@ private:
         label(nodeCamHeightOffsetLabel_, "Camera offset:", "Camera height offset:");
         label(nodeTarHeightOffsetLabel_, "Target offset:", "Target height offset:");
         label(nodeCameraAnimationLabel_, "Camera anim:", "Camera animation:");
-        label(nodePostProcLabel_, "Post-process:", "Post-process node:");
         label(nodeAlienRaceLabel_, "Alien-race:", "Alien-race node:");
         label(nodeCameraFovLabel_, "Camera FOV:", "Camera field of view:");
         label(linkDesignerNumberLabel_, "Designer number:", "Designer number available to script:");
@@ -2078,7 +2078,6 @@ private:
         scalar(nodeFadeColorB_, nullptr, "0.0000", FromDIP(wxSize(72, -1)));
         scalar(nodeFadeDelay_, nodeFadeDelayLabel_, "1000.0000");
         scalar(nodeFadeLength_, nodeFadeLengthLabel_, "1000.0000");
-        scalar(nodePostProc_, nodePostProcLabel_, "-2147483648");
         scalar(nodeAlienRace_, nodeAlienRaceLabel_, "-2147483648");
         scalar(linkLogic_, linkLogicLabel_, "-2147483648");
         scalar(linkDesignerNumber_, linkDesignerNumberLabel_, "-2147483648");
@@ -2750,11 +2749,8 @@ private:
         nodeFadeLength_ = addTextFieldWithUnit(page, form, "Fade length:", "seconds",
                                                 &nodeFadeLengthLabel_, &nodeFadeLengthUnit_);
 
-        nodePostProc_ = addTextField(page, form, "Post-process node:", 0, wxDefaultSize, &nodePostProcLabel_);
         nodeAlienRace_ = addTextField(page, form, "Alien-race node:", 0, wxDefaultSize, &nodeAlienRaceLabel_);
         nodeUnskippable_ = addCheckField(page, form, "Node is unskippable", &nodeUnskippablePlaceholder_);
-        nodeRecordVo_ = addCheckField(page, form, "Record VO", &nodeRecordVoPlaceholder_);
-        nodeRecordNoVoOverride_ = addCheckField(page, form, "No-VO override", &nodeRecordNoVoPlaceholder_);
 
         nodeCameraAngle_->SetToolTip(
             "0 uses the deterministic automatic camera sequence; 1-3 are calculated presets; 6 uses Camera ID.");
@@ -2984,13 +2980,10 @@ private:
         linkLogic_ = addTextField(page, form, "Logic mode:", 0, wxDefaultSize, &linkLogicLabel_);
         linkParamStrA_ = addTextField(page, form, "Conditional string A:", 0, wxDefaultSize, &linkParamStrALabel_);
         linkParamStrB_ = addTextField(page, form, "Conditional string B:", 0, wxDefaultSize, &linkParamStrBLabel_);
-        linkComment_ = addResizableInspectorText(page, form, "Link comment:",
-            "NeoDLG link comment", &linkCommentLabel_, 0, 70);
         linkDesignerNumber_ = addTextField(page, form, "Designer number available to script:", 0,
                                            wxDefaultSize, &linkDesignerNumberLabel_);
         linkNot1_ = addCheckField(page, form, "Negate conditional 1", &linkNot1Placeholder_);
         linkNot2_ = addCheckField(page, form, "Negate conditional 2", &linkNot2Placeholder_);
-        linkIsChild_ = addCheckField(page, form, "IsChild link", &linkIsChildPlaceholder_);
         linkReverseCond_ = addCheckField(page, form, "Negate condition", &linkReverseCondPlaceholder_);
         root->Add(form, 0, wxEXPAND | wxALL, 10);
 
@@ -3301,7 +3294,7 @@ private:
 
 
         auto candidate = std::make_unique<GffModel>();
-        candidate->load(path);
+        loadDlgModel(*candidate, path);
         if (!neoshared::sameGffResourceType(candidate->fileType(), "DLG ")) {
             throw std::invalid_argument("The selected file is not a DLG resource.");
         }
@@ -3414,10 +3407,11 @@ private:
             }
 
             checkDestination(target);
+            removeRetiredDlgFields(*document.model);
 #if defined(__EMSCRIPTEN__)
             const bool wasDirty = document.model->dirty();
 #endif
-            document.model->save(target);
+            saveDlgModel(*document.model, target);
 
 #if defined(__EMSCRIPTEN__)
             document.saveInProgress = true;
@@ -3580,10 +3574,11 @@ private:
             if (!model().gff().isGff4()) snapshot = model().toXml();
             try {
                 function();
+                removeRetiredDlgFields(model());
             } catch (...) {
                 if (!snapshot.empty()) {
                     try {
-                        model().importXml(snapshot);
+                        importDlgModelXml(model(), snapshot);
                     } catch (...) {
                         // Preserve the original operation error. The next open/save
                         // action can still recover from the on-disk file.
@@ -3611,7 +3606,7 @@ private:
             UndoSnapshot snapshot = std::move(activeDocument().undo.back());
             activeDocument().undo.pop_back();
             activeDocument().redo.push_back({snapshot.description, model().toXml()});
-            model().importXml(snapshot.xml);
+            importDlgModelXml(model(), snapshot.xml);
             refreshAll();
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
@@ -3622,7 +3617,7 @@ private:
             UndoSnapshot snapshot = std::move(activeDocument().redo.back());
             activeDocument().redo.pop_back();
             activeDocument().undo.push_back({snapshot.description, model().toXml()});
-            model().importXml(snapshot.xml);
+            importDlgModelXml(model(), snapshot.xml);
             refreshAll();
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
@@ -4205,7 +4200,7 @@ private:
     void importFromPath(bool json, const std::filesystem::path& chosen) {
         mutate(json ? "Import JSON" : "Import XML", [this, chosen, json]() {
             const std::string source = readTextFile(chosen);
-            model().importXml(json ? gffJsonToXml(source) : source);
+            importDlgModelXml(model(), json ? gffJsonToXml(source) : source);
             activeDocument().selectedNode.reset();
             activeDocument().selectedLink.reset();
         });
@@ -4252,6 +4247,7 @@ private:
                                                   stem + (json ? ".json" : ".xml"));
         if (!chosen) return;
         try {
+            removeRetiredDlgFields(model());
             const std::string xml = model().toXml();
             checkOutput(*chosen, true);
             writeTextFile(*chosen, json ? gffXmlToJson(xml) : xml);
@@ -4262,6 +4258,7 @@ private:
         neodlg::patcher::DlgPatchMode patchMode,
         std::optional<std::filesystem::path> originalPath) {
         try {
+            removeRetiredDlgFields(model());
             const std::filesystem::path sourcePath = documentFilename(activeDocument());
             std::string defaultName = sourcePath.empty()
                 ? "modified.dlg"
@@ -4471,6 +4468,8 @@ private:
 
     void refreshAll() {
         if (!hasActiveDocument()) return;
+        // Hosts can edit the underlying shared GffModel directly.
+        removeRetiredDlgFields(model());
         refreshHeader();
         updateTabTitle();
         refreshUndoMenu();
@@ -4838,11 +4837,8 @@ private:
                               document.hasNodeField(ref, "FadeColor"));
             loadField(nodeFadeDelay_, document.nodeField(ref, "FadeDelay"));
             loadField(nodeFadeLength_, document.nodeField(ref, "FadeLength"));
-            loadField(nodePostProc_, document.nodeField(ref, "PostProcNode"));
             loadField(nodeAlienRace_, document.nodeField(ref, "AlienRaceNode"));
             setBoolControl(nodeUnskippable_, document.nodeField(ref, "NodeUnskippable"));
-            setBoolControl(nodeRecordVo_, document.nodeField(ref, "RecordVO"));
-            setBoolControl(nodeRecordNoVoOverride_, document.nodeField(ref, "RecordNoVOOverri"));
         } else {
             nodeJadeSkippable_->SetValue(
                 !document.hasNodeField(ref, "Skippable") || document.nodeField(ref, "Skippable") != "0");
@@ -4863,10 +4859,8 @@ private:
                 loadField(linkLogic_, document.linkField(linkRef, "Logic"));
                 loadField(linkParamStrA_, document.linkField(linkRef, "ParamStrA"));
                 loadField(linkParamStrB_, document.linkField(linkRef, "ParamStrB"));
-                loadField(linkComment_, document.linkField(linkRef, "LinkComment"));
                 setBoolControl(linkNot1_, document.linkField(linkRef, "Not"));
                 setBoolControl(linkNot2_, document.linkField(linkRef, "Not2"));
-                setBoolControl(linkIsChild_, document.linkField(linkRef, "IsChild"));
                 for (int i = 0; i < 5; ++i) {
                     linkParamFields_->SetCellValue(
                         i, 0, wxui::toWx(document.linkField(linkRef, "Param" + std::to_string(i + 1))));
@@ -4916,14 +4910,14 @@ private:
                 nodeActionStrA_, nodeActionStrB_, actionParamFields_, nodeSound_, nodeDelay_, nodeWaitFlags_,
                 nodeCameraAngle_, nodeCameraId_, nodeCamHeightOffset_, nodeTarHeightOffset_, nodeCameraFovMode_, nodeCameraFov_,
                 nodeCameraAnimation_, nodeEmotion_, nodeFacialAnim_, nodeCamVidEffectPanel_, nodeFadeType_, nodeFadeColorPicker_,
-                nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodePostProc_, nodeAlienRace_,
-                nodeUnskippable_, nodeRecordVo_, nodeRecordNoVoOverride_, animationList_, animationAddButton_,
+                nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodeAlienRace_,
+                nodeUnskippable_, animationList_, animationAddButton_,
                 animationEditButton_, animationDeleteButton_};
     }
 
     std::vector<wxWindow*> linkInspectorWindows() const {
-        return {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkComment_, linkDesignerNumber_,
-                linkNot1_, linkNot2_, linkIsChild_, linkReverseCond_, linkDisplayInactive_, linkParamFields_};
+        return {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkDesignerNumber_,
+                linkNot1_, linkNot2_, linkReverseCond_, linkDisplayInactive_, linkParamFields_};
     }
 
     void clearInspectorControls() {
@@ -4940,7 +4934,7 @@ private:
                                     nodeScriptCamReplies_, nodeCameraReplies_, nodeQuest_, nodeQuestEntry_, nodePlotIndex_,
                                     nodePlotXp_, nodeActionStrA_, nodeActionStrB_, nodeSound_, nodeDelay_, nodeWaitFlags_, nodeCameraId_,
                                     nodeCamHeightOffset_, nodeTarHeightOffset_, nodeCameraFov_, nodeCameraAnimation_, nodeEmotion_, nodeFacialAnim_,
-                                    nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodePostProc_, nodeAlienRace_}) {
+                                    nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodeAlienRace_}) {
             if (control) control->ChangeValue("");
         }
         if (nodeCameraAngle_) {
@@ -4967,7 +4961,7 @@ private:
         loadedFadeColorRaw_.clear();
         fadeColorEdited_ = false;
         updateCameraControls();
-        for (wxCheckBox* check : {nodeJadeSkippable_, nodeUnskippable_, nodeRecordVo_, nodeRecordNoVoOverride_}) {
+        for (wxCheckBox* check : {nodeJadeSkippable_, nodeUnskippable_}) {
             if (check) check->SetValue(false);
         }
         if (actionParamFields_) actionParamFields_->ClearValues();
@@ -4980,9 +4974,9 @@ private:
     }
 
     void clearLinkControls() {
-        for (wxTextCtrl* control : {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkComment_, linkDesignerNumber_})
+        for (wxTextCtrl* control : {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkDesignerNumber_})
             if (control) control->ChangeValue("");
-        for (wxCheckBox* check : {linkNot1_, linkNot2_, linkIsChild_, linkReverseCond_}) if (check) check->SetValue(false);
+        for (wxCheckBox* check : {linkNot1_, linkNot2_, linkReverseCond_}) if (check) check->SetValue(false);
         if (linkParamFields_) linkParamFields_->ClearValues();
     }
 
@@ -5224,14 +5218,6 @@ private:
             return !text.empty() || field->IsModified();
         };
 
-        // Removed in every presentation, never from the serialized document.
-        // Show optional fields must not resurrect these authoring controls.
-        pair(nodePostProcLabel_, nodePostProc_, false);
-        pair(nodeRecordVoPlaceholder_, nodeRecordVo_, false);
-        pair(nodeRecordNoVoPlaceholder_, nodeRecordNoVoOverride_, false);
-        pair(linkCommentLabel_, linkComment_, false);
-        pair(linkIsChildPlaceholder_, linkIsChild_, false);
-
         const bool valid = hasActiveDocument() && model().loaded() &&
                            dialogue().semanticallyEditable() && activeDocument().selectedNode &&
                            dialogue().node(*activeDocument().selectedNode);
@@ -5428,11 +5414,8 @@ private:
                      nodeFadeColorGLabel_, nodeFadeColorG_, nodeFadeColorBLabel_, nodeFadeColorB_}, !jade);
         showWindows({nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_,
                      nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}, !jade);
-        showPair(nodePostProcLabel_, nodePostProc_, !jade);
         showPair(nodeAlienRaceLabel_, nodeAlienRace_, !jade);
         showPair(nodeUnskippablePlaceholder_, nodeUnskippable_, !jade);
-        showPair(nodeRecordVoPlaceholder_, nodeRecordVo_, !jade);
-        showPair(nodeRecordNoVoPlaceholder_, nodeRecordNoVoOverride_, !jade);
         if (presentationApplyButton_) presentationApplyButton_->Show(!jade);
 
         // Jade links contain one condition, ReverseCond, DesignerNumber, and Index.
@@ -5441,10 +5424,8 @@ private:
         showPair(linkLogicLabel_, linkLogic_, !jade);
         showPair(linkParamStrALabel_, linkParamStrA_, !jade);
         showPair(linkParamStrBLabel_, linkParamStrB_, !jade);
-        showPair(linkCommentLabel_, linkComment_, !jade);
         showPair(linkNot1Placeholder_, linkNot1_, !jade);
         showPair(linkNot2Placeholder_, linkNot2_, !jade);
-        showPair(linkIsChildPlaceholder_, linkIsChild_, !jade);
         showPair(linkDesignerNumberLabel_, linkDesignerNumber_, jade);
         showPair(linkReverseCondPlaceholder_, linkReverseCond_, jade);
         showWindows({linkParamHeading_, linkParamFields_}, !jade);
@@ -5711,16 +5692,10 @@ private:
     wxTextCtrl* nodeFadeLength_ = nullptr;
     wxStaticText* nodeFadeLengthUnit_ = nullptr;
 
-    wxStaticText* nodePostProcLabel_ = nullptr;
-    wxTextCtrl* nodePostProc_ = nullptr;
     wxStaticText* nodeAlienRaceLabel_ = nullptr;
     wxTextCtrl* nodeAlienRace_ = nullptr;
     wxStaticText* nodeUnskippablePlaceholder_ = nullptr;
     wxCheckBox* nodeUnskippable_ = nullptr;
-    wxStaticText* nodeRecordVoPlaceholder_ = nullptr;
-    wxCheckBox* nodeRecordVo_ = nullptr;
-    wxStaticText* nodeRecordNoVoPlaceholder_ = nullptr;
-    wxCheckBox* nodeRecordNoVoOverride_ = nullptr;
 
     wxStaticText* linkHeader_ = nullptr;
     wxStaticText* linkActive1Label_ = nullptr;
@@ -5733,8 +5708,6 @@ private:
     wxTextCtrl* linkParamStrA_ = nullptr;
     wxStaticText* linkParamStrBLabel_ = nullptr;
     wxTextCtrl* linkParamStrB_ = nullptr;
-    wxStaticText* linkCommentLabel_ = nullptr;
-    wxTextCtrl* linkComment_ = nullptr;
     wxCheckBox* linkDisplayInactive_ = nullptr;
     bool linkDisplayInactiveEdited_ = false;
     wxStaticText* linkDesignerNumberLabel_ = nullptr;
@@ -5743,8 +5716,6 @@ private:
     wxCheckBox* linkNot1_ = nullptr;
     wxStaticText* linkNot2Placeholder_ = nullptr;
     wxCheckBox* linkNot2_ = nullptr;
-    wxStaticText* linkIsChildPlaceholder_ = nullptr;
-    wxCheckBox* linkIsChild_ = nullptr;
     wxStaticText* linkReverseCondPlaceholder_ = nullptr;
     wxCheckBox* linkReverseCond_ = nullptr;
     wxStaticText* linkParamHeading_ = nullptr;
