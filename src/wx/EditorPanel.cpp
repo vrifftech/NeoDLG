@@ -1677,10 +1677,9 @@ private:
         auto* page = semanticWorkspace_;
         auto* root = new wxBoxSizer(wxVERTICAL);
 
-        auto* toolbar = new wxWrapSizer(wxHORIZONTAL);
+        semanticToolbarSizer_ = new wxBoxSizer(wxVERTICAL);
         const auto addToolbarButton = [&](int id, const wxString& label) {
-            toolbar->Add(new wxButton(page, id, label), 0,
-                         wxRIGHT | wxBOTTOM, FromDIP(4));
+            semanticToolbarButtons_.push_back(new wxButton(page, id, label));
         };
         addToolbarButton(ID_AddStartingEntry, "Add Start Entry");
         addToolbarButton(ID_AddChild, "Add Child");
@@ -1688,16 +1687,14 @@ private:
         addToolbarButton(ID_DuplicateNode, "Duplicate");
         addToolbarButton(ID_RemoveLink, "Remove Link");
         addToolbarButton(ID_DeleteNode, "Delete Node");
-        root->Add(toolbar, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
 
-        auto* findRow = new wxBoxSizer(wxHORIZONTAL);
-        findRow->Add(new wxStaticText(page, wxID_ANY, "Find:"), 0,
-                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        findLabel_ = new wxStaticText(page, wxID_ANY, "Find:");
         findText_ = new wxTextCtrl(page, wxID_ANY);
+        findText_->SetName("NeoDLG dialogue find");
         findText_->SetMinSize(FromDIP(wxSize(160, -1)));
-        findRow->Add(findText_, 1, wxEXPAND | wxRIGHT, FromDIP(4));
-        findRow->Add(new wxButton(page, ID_FindNext, "Next"), 0);
-        root->Add(findRow, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(6));
+        findNextButton_ = new wxButton(page, ID_FindNext, "Next");
+        rebuildSemanticToolbar(false);
+        root->Add(semanticToolbarSizer_, 0, wxEXPAND);
 
         auto* splitter = new wxSplitterWindow(page, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                                wxSP_LIVE_UPDATE | wxSP_3D);
@@ -1744,6 +1741,53 @@ private:
         parent->AddPage(conversationWorkspacePage_, "Conversation", true);
         parent->AddPage(singlePanelWorkspacePage_, "Single Panel", false);
         bindInspectorWheelForwarding(inspectorHost_);
+    }
+
+    void rebuildSemanticToolbar(bool singlePanel) {
+        if (!semanticToolbarSizer_) return;
+
+        // Rebuild only the sizers: retain the same buttons, search text,
+        // selection, keyboard focus and event IDs across workspace switches.
+        semanticToolbarSizer_->Clear(false);
+        const auto sizeButton = [singlePanel](wxButton* button) {
+            const long style = button->GetWindowStyleFlag();
+            button->SetWindowStyleFlag(singlePanel
+                ? style | wxBU_EXACTFIT : style & ~wxBU_EXACTFIT);
+            button->InvalidateBestSize();
+        };
+        sizeButton(findNextButton_);
+
+        // wxWrapSizer normally stretches the last item on *each* line. With
+        // Delete Node last, that turns it into a wide destructive-action bar.
+        // In Single Panel no action may stretch, including after wrapping.
+        auto* toolbar = new wxWrapSizer(wxHORIZONTAL, singlePanel
+            ? wxREMOVE_LEADING_SPACES : wxWRAPSIZER_DEFAULT_FLAGS);
+        for (auto* button : semanticToolbarButtons_) {
+            sizeButton(button);
+            toolbar->Add(button, 0, wxRIGHT | wxBOTTOM |
+                (singlePanel ? wxALIGN_CENTER_VERTICAL : 0), FromDIP(4));
+        }
+
+        auto* findRow = new wxBoxSizer(wxHORIZONTAL);
+        findRow->Add(findLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        findRow->Add(findText_, 1, wxEXPAND | wxRIGHT, FromDIP(4));
+        findRow->Add(findNextButton_, 0);
+
+        if (singlePanel) {
+            // One intact group immediately to the right of the actions when
+            // it fits. On narrow windows the group wraps without clipping or
+            // stretching the preceding button. There is no reserved find row.
+            toolbar->Add(findRow, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(4));
+        }
+        semanticToolbarSizer_->Add(toolbar, 0,
+            wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
+        if (!singlePanel) {
+            // Preserve Conversation's original toolbar, full-width search
+            // row and spacing. GFF Tree has a separate, untouched filter.
+            semanticToolbarSizer_->Add(findRow, 0,
+                wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(6));
+        }
+        semanticWorkspace_->InvalidateBestSize();
     }
 
     void setSemanticWorkspaceHost(bool singlePanel) {
@@ -2311,6 +2355,10 @@ private:
         }
 
         singlePanelActive_ = singlePanel;
+        rebuildSemanticToolbar(singlePanel);
+        // Relayout the whole workspace, not only the inspector: the splitter
+        // must receive the height released when the separate find row vanishes.
+        semanticWorkspace_->Layout();
         rebuildInspectorForms(singlePanel);
         inspectorBook_->Show(!singlePanel);
         singleInspector_->Show(singlePanel);
@@ -5066,6 +5114,10 @@ private:
     wxPanel* semanticWorkspace_ = nullptr;
     wxBoxSizer* conversationWorkspaceSizer_ = nullptr;
     wxBoxSizer* singlePanelWorkspaceSizer_ = nullptr;
+    wxBoxSizer* semanticToolbarSizer_ = nullptr;
+    std::vector<wxButton*> semanticToolbarButtons_;
+    wxStaticText* findLabel_ = nullptr;
+    wxButton* findNextButton_ = nullptr;
 
     wxTreeCtrl* conversationTree_ = nullptr;
     wxPanel* inspectorHost_ = nullptr;
