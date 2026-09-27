@@ -170,6 +170,33 @@ int inspectorFieldColumns(const std::vector<std::array<int, 2>>& widths,
     return 1;
 }
 
+// Pack complete label/value groups in reading order using their actual widths.
+// Unlike a column grid, a long label on one row does not pad every other row.
+// No two/three-field ceiling: short groups keep filling the current row. An
+// oversized group gets a row of its own without truncating or splitting it.
+std::vector<int> inspectorFieldRows(const std::vector<int>& widths,
+                                    int availableWidth, int gap) {
+    const std::int64_t available = std::max(1, availableWidth);
+    const std::int64_t spacing = std::max(0, gap);
+    std::vector<int> rows;
+    rows.reserve(widths.size());
+    std::int64_t used = 0;
+    int row = 0;
+    bool occupied = false;
+    for (const int value : widths) {
+        const std::int64_t width = std::max(0, value);
+        if (occupied && used + spacing + width > available) {
+            ++row;
+            used = 0;
+            occupied = false;
+        }
+        used += (occupied ? spacing : 0) + width;
+        occupied = true;
+        rows.push_back(row);
+    }
+    return rows;
+}
+
 // Conversation keeps its original grid; Single Panel uses content-sized native
 // fields without an unused grid canvas. Switching copies only pending UI text,
 // never applies it to the document or changes numeric parsing/validation.
@@ -1987,7 +2014,7 @@ private:
             activeDocument().selectedNode->kind == DlgNodeKind::Entry);
         // Dialect refreshes also change these captions. Apply the view-specific
         // captions on every layout refresh, not just when switching views.
-        const auto label = [singlePanel](wxStaticText* control, const wxString& compact,
+        const auto label = [singlePanel](wxControl* control, const wxString& compact,
                                          const wxString& conversation) {
             const wxString& text = singlePanel ? compact : conversation;
             if (control->GetLabel() != text) control->SetLabel(text);
@@ -2017,7 +2044,14 @@ private:
         label(nodeTarHeightOffsetLabel_, "Target offset:", "Target height offset:");
         label(nodeCameraAnimationLabel_, "Camera anim:", "Camera animation:");
         label(nodeAlienRaceLabel_, "Alien-race:", "Alien-race node:");
-        label(nodeCameraFovLabel_, "Camera FOV:", "Camera field of view:");
+        label(nodeCameraFovLabel_, "FOV:", "Camera field of view:");
+        label(nodeCameraAngleLabel_, "Camera:", "Camera angle:");
+        label(nodeCamVidEffectLabel_, "Video effect:", "Camera video effect:");
+        label(nodeFadeTypeLabel_, "Fade:", "Fade type:");
+        label(nodeFacialAnimLabel_, "Facial:", "Facial animation:");
+        label(nodeUnskippable_, "Unskippable", "Node is unskippable");
+        label(linkNot1_, "Not 1", "Negate conditional 1");
+        label(linkNot2_, "Not 2", "Negate conditional 2");
         label(linkDesignerNumberLabel_, "Designer number:", "Designer number available to script:");
         linkDesignerNumber_->SetToolTip(singlePanel ? "Designer number available to script." : "");
         nodeFadeDelayUnit_->SetLabel(singlePanel ? "s" : "seconds");
@@ -2111,57 +2145,74 @@ private:
         wxWindow* label;
         wxWindow* control;
         wxWindow* unit = nullptr;
+        // Optional companions stay with their primary field (e.g. custom FOV
+        // and its units), but consume no space while contextually hidden.
+        std::vector<wxWindow*> companions{};
     };
 
     struct CompactInspectorBand {
-        wxFlexGridSizer* grid;
+        wxBoxSizer* rows;
         std::vector<InspectorField> fields;
-        std::vector<wxWindow*> shown;
-        int maximumColumns;
+        std::vector<std::vector<wxWindow*>> shown;
+        std::vector<int> rowIndices;
         wxSizerItem* item;
     };
 
     void refreshCompactInspectorBands() {
         if (!singlePanelActive_ || !singleInspector_) return;
-        // Account for the section box and its content margins. Never use a
-        // section's minimum width here: FitInside may still be updating it.
+        // Measure the visible scroll viewport, never a cached section minimum.
         const int availableWidth = std::max(1,
             singleInspector_->GetClientSize().x - FromDIP(36));
-        const int gap = FromDIP(8);
+        const int groupGap = FromDIP(10);
+        const int fieldGap = FromDIP(4);
         for (auto* parameters : {actionParamFields_, linkParamFields_}) {
             if (parameters) parameters->SetAvailableWidth(availableWidth);
         }
+        // The video's choice list changes with game flavor. Do not keep the
+        // containing panel's best width from a previously selected document.
+        nodeCamVidEffectPanel_->InvalidateBestSize();
         for (auto& band : compactInspectorBands_) {
-            std::vector<wxWindow*> shown;
-            std::vector<std::array<int, 2>> widths;
+            std::vector<std::vector<wxWindow*>> shown;
+            std::vector<int> widths;
             for (const auto& field : band.fields) {
-                if (!field.control->IsShown() || !field.label->IsShown()) continue;
-                shown.push_back(field.control);
-                int valueWidth = field.control->GetEffectiveMinSize().x;
-                if (field.unit && field.unit->IsShown())
-                    valueWidth += FromDIP(4) + field.unit->GetEffectiveMinSize().x;
-                widths.push_back({field.label->GetEffectiveMinSize().x, valueWidth});
+                if (!field.control->IsShown() || (field.label && !field.label->IsShown())) continue;
+                std::vector<wxWindow*> parts;
+                if (field.label) parts.push_back(field.label);
+                parts.push_back(field.control);
+                if (field.unit && field.unit->IsShown()) parts.push_back(field.unit);
+                for (auto* companion : field.companions)
+                    if (companion->IsShown()) parts.push_back(companion);
+                std::int64_t width = 0;
+                for (auto* part : parts)
+                    width += std::max(0, part->GetEffectiveMinSize().x);
+                width += static_cast<std::int64_t>(fieldGap) * (parts.size() - 1);
+                widths.push_back(static_cast<int>(std::min<std::int64_t>(
+                    width, std::numeric_limits<int>::max())));
+                shown.push_back(std::move(parts));
             }
-            const int columns = inspectorFieldColumns(widths, availableWidth,
-                                                       gap, band.maximumColumns);
-            band.grid->SetCols(2 * columns);
-            band.item->SetBorder(shown.empty() ? 0 : FromDIP(4));
-            if (shown == band.shown) continue;
-            // Hidden dialect-specific fields must not leave empty grid cells.
-            // Delete only the tiny value/unit sizers, never the live controls.
-            band.grid->Clear(false);
+            const auto rowIndices = inspectorFieldRows(widths, availableWidth, groupGap);
+            band.item->SetBorder(shown.empty() ? 0 : FromDIP(3));
+            if (shown == band.shown && rowIndices == band.rowIndices) continue;
+            // Rebuild only sizers. Preserve live controls, pending edits, native
+            // undo buffers, focus, visibility and all event bindings.
+            band.rows->Clear(false);
             band.shown = std::move(shown);
-            for (const auto& field : band.fields) {
-                if (!field.control->IsShown() || !field.label->IsShown()) continue;
-                band.grid->Add(field.label, 0, wxALIGN_CENTER_VERTICAL);
-                if (field.unit) {
-                    auto* value = new wxBoxSizer(wxHORIZONTAL);
-                    value->Add(field.control, 0, wxALIGN_CENTER_VERTICAL);
-                    value->Add(field.unit, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(4));
-                    band.grid->Add(value, 0, wxALIGN_CENTER_VERTICAL);
-                } else {
-                    band.grid->Add(field.control, 0, wxALIGN_CENTER_VERTICAL);
+            band.rowIndices = rowIndices;
+            wxBoxSizer* row = nullptr;
+            int previousRow = -1;
+            for (std::size_t i = 0; i < band.shown.size(); ++i) {
+                const bool newRow = rowIndices[i] != previousRow;
+                if (newRow) {
+                    row = new wxBoxSizer(wxHORIZONTAL);
+                    band.rows->Add(row, 0, wxEXPAND | wxTOP,
+                                   previousRow < 0 ? 0 : FromDIP(3));
+                    previousRow = rowIndices[i];
                 }
+                auto* group = new wxBoxSizer(wxHORIZONTAL);
+                for (std::size_t part = 0; part < band.shown[i].size(); ++part)
+                    group->Add(band.shown[i][part], 0, wxALIGN_CENTER_VERTICAL | wxLEFT,
+                               part == 0 ? 0 : fieldGap);
+                row->Add(group, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, newRow ? 0 : groupGap);
             }
         }
     }
@@ -2214,31 +2265,10 @@ private:
             auto* item = root->Add(form, stretch, wxEXPAND | wxALL, pad);
             if (singlePanel) compactInspectorRows_.push_back(item);
         };
-        const auto band = [&](wxSizer* root, std::initializer_list<InspectorField> fields,
-                              int maximumColumns = 2) {
-            auto* grid = new wxFlexGridSizer(2, FromDIP(3), FromDIP(8));
-            // Inline label/value pairs share actual grid rows. Do not put a
-            // vertical label-over-control sizer into a wxWrapSizer: wrapping
-            // each pair separately can consume as much height as the old form.
-            auto* item = root->Add(grid, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, pad);
-            compactInspectorBands_.push_back({grid, fields, {}, maximumColumns, item});
-        };
-        const auto checks = [&](wxSizer* root, std::initializer_list<wxWindow*> fields,
-                                std::initializer_list<InspectorField> values = {}) {
-            auto* wrap = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
-            // Logic mode and Designer number are mutually exclusive by dialect.
-            // Put the visible value alongside its link flags instead of leaving
-            // a mostly empty numeric-only row above those flags.
-            for (const auto& field : values) {
-                auto* pair = new wxBoxSizer(wxHORIZONTAL);
-                pair->Add(field.label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
-                pair->Add(field.control, 0, wxALIGN_CENTER_VERTICAL);
-                wrap->Add(pair, 0, wxRIGHT | wxBOTTOM, FromDIP(8));
-            }
-            for (auto* field : fields)
-                wrap->Add(field, 0, wxRIGHT | wxBOTTOM, FromDIP(8));
-            auto* item = root->Add(wrap, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, pad);
-            if (singlePanel) compactInspectorRows_.push_back(item);
+        const auto band = [&](wxSizer* root, std::initializer_list<InspectorField> fields) {
+            auto* lines = new wxBoxSizer(wxVERTICAL);
+            auto* item = root->Add(lines, 0, wxEXPAND | wxALL, FromDIP(3));
+            compactInspectorBands_.push_back({lines, fields, {}, {}, item});
         };
         const auto apply = [&](wxSizer* root, wxWindow* page, int id) {
             root->Add(page->FindWindow(id), 0, wxALIGN_RIGHT | wxALL, pad);
@@ -2261,9 +2291,9 @@ private:
                           0, wxEXPAND | wxALL, pad);
                 auto* form = newForm();
                 if (singlePanel) {
-                    band(root, {{nodeSpeakerLabel_, nodeSpeaker_}, {nodeListenerLabel_, nodeListener_}});
-                    band(root, {{nodeStrRefLabel_, nodeStrRef_}, {nodeVoLabel_, nodeVo_},
-                                {nodeStringTypeLabel_, nodeStringType_}}, 3);
+                    band(root, {{nodeSpeakerLabel_, nodeSpeaker_}, {nodeListenerLabel_, nodeListener_},
+                                {nodeStrRefLabel_, nodeStrRef_}, {nodeVoLabel_, nodeVo_},
+                                {nodeStringTypeLabel_, nodeStringType_}, {nullptr, nodeJadeSkippable_}});
                     rows(form, {{nodeLocalTextLabel_, nodeLocalText_}, {nodeResolvedTextLabel_, nodeResolvedText_},
                                 {nodeCommentLabel_, nodeComment_}});
                 } else {
@@ -2275,17 +2305,16 @@ private:
                 }
                 root->Add(form, singlePanel ? 0 : 1,
                           wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, pad);
-                if (singlePanel) checks(root, {nodeJadeSkippable_});
                 apply(root, page, ID_ApplyNode);
             } else if (index == 1) {
                 auto* form = newForm();
                 if (singlePanel) {
-                    band(root, {{nodeScript1Label_, nodeScript1_}, {nodeScript2Label_, nodeScript2_}});
-                    band(root, {{nodeScriptCamEntryLabel_, nodeScriptCamEntry_}, {nodeCameraEntryLabel_, nodeCameraEntry_},
-                                {nodeScriptCamRepliesLabel_, nodeScriptCamReplies_}, {nodeCameraRepliesLabel_, nodeCameraReplies_}});
-                    band(root, {{nodeQuestLabel_, nodeQuest_}, {nodeQuestEntryLabel_, nodeQuestEntry_}});
-                    band(root, {{nodePlotIndexLabel_, nodePlotIndex_}, {nodePlotXpLabel_, nodePlotXp_}});
-                    band(root, {{nodeActionStrALabel_, nodeActionStrA_}, {nodeActionStrBLabel_, nodeActionStrB_}});
+                    band(root, {{nodeScript1Label_, nodeScript1_}, {nodeScript2Label_, nodeScript2_},
+                                {nodeScriptCamEntryLabel_, nodeScriptCamEntry_}, {nodeCameraEntryLabel_, nodeCameraEntry_},
+                                {nodeScriptCamRepliesLabel_, nodeScriptCamReplies_}, {nodeCameraRepliesLabel_, nodeCameraReplies_},
+                                {nodeActionStrALabel_, nodeActionStrA_}, {nodeActionStrBLabel_, nodeActionStrB_},
+                                {nodeQuestLabel_, nodeQuest_}, {nodeQuestEntryLabel_, nodeQuestEntry_},
+                                {nodePlotIndexLabel_, nodePlotIndex_}, {nodePlotXpLabel_, nodePlotXp_}});
                     delete form; // No expanded single-column form in this view.
                 } else {
                     rows(form, {{nodeScript1Label_, nodeScript1_}, {nodeScript2Label_, nodeScript2_},
@@ -2300,73 +2329,62 @@ private:
                 apply(root, page, ID_ApplyScripts);
             } else if (index == 2) {
                 root->Add(jadePresentationNote_, 0, wxEXPAND | wxALL, pad);
-                auto* form = newForm();
                 if (singlePanel) {
+                    // One continuous flow instead of separate sound, camera,
+                    // FOV, video, fade and flag rows with half-empty tails.
                     band(root, {{nodeSoundLabel_, nodeSound_}, {nodeDelayLabel_, nodeDelay_},
-                                {nodeWaitFlagsLabel_, nodeWaitFlags_}}, 3);
-                } else {
-                    rows(form, {{nodeSoundLabel_, nodeSound_}, {nodeDelayLabel_, nodeDelay_},
-                                {nodeWaitFlagsLabel_, nodeWaitFlags_}});
-                }
-                row(form, {nodeCameraAngleLabel_, nodeCameraAngle_});
-                if (singlePanel) {
-                    addForm(root, form);
-                    band(root, {{nodeCameraIdLabel_, nodeCameraId_},
+                                {nodeWaitFlagsLabel_, nodeWaitFlags_},
+                                {nodeCameraAngleLabel_, nodeCameraAngle_}, {nodeCameraIdLabel_, nodeCameraId_},
                                 {nodeCameraAnimationLabel_, nodeCameraAnimation_},
+                                {nodeCameraFovLabel_, nodeCameraFovMode_, nullptr,
+                                    {nodeCameraFov_, nodeCameraFovUnit_}},
                                 {nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
                                 {nodeTarHeightOffsetLabel_, nodeTarHeightOffset_},
-                                {nodeEmotionLabel_, nodeEmotion_},
-                                {nodeFacialAnimLabel_, nodeFacialAnim_}});
-                    form = newForm();
-                } else rows(form, {{nodeCameraIdLabel_, nodeCameraId_},
-                                   {nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
-                                   {nodeTarHeightOffsetLabel_, nodeTarHeightOffset_}});
-                if (singlePanel || nodeCameraFovLabel_->IsShown()) {
-                    form->Add(nodeCameraFovLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, singlePanel ? FromDIP(3) : 8);
-                    auto* fov = new wxBoxSizer(wxHORIZONTAL);
-                    fov->Add(nodeCameraFovMode_, 0, wxRIGHT, 6);
-                    fov->Add(nodeCameraFov_, singlePanel ? 0 : 1, wxEXPAND | wxRIGHT, 6);
-                    fov->Add(nodeCameraFovUnit_, 0, wxALIGN_CENTER_VERTICAL);
-                    form->Add(fov, 1, wxEXPAND);
-                }
-                if (singlePanel) {
-                    addForm(root, form);
-                    form = newForm();
-                } else rows(form, {{nodeCameraAnimationLabel_, nodeCameraAnimation_},
-                                   {nodeEmotionLabel_, nodeEmotion_}, {nodeFacialAnimLabel_, nodeFacialAnim_}});
-                row(form, {nodeCamVidEffectLabel_, nodeCamVidEffectPanel_});
-                if (singlePanel) {
-                    addForm(root, form);
-                    band(root, {{nodeFadeTypeLabel_, nodeFadeType_},
+                                {nodeCamVidEffectLabel_, nodeCamVidEffectPanel_},
+                                {nodeEmotionLabel_, nodeEmotion_}, {nodeFacialAnimLabel_, nodeFacialAnim_},
+                                {nodeAlienRaceLabel_, nodeAlienRace_}, {nullptr, nodeUnskippable_},
+                                {nodeFadeTypeLabel_, nodeFadeType_},
                                 {nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
-                                {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}}, 3);
-                    form = newForm();
-                } else row(form, {nodeFadeTypeLabel_, nodeFadeType_});
-                if (singlePanel || nodeFadeColorLabel_->IsShown()) {
-                    form->Add(nodeFadeColorLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, singlePanel ? FromDIP(3) : 8);
-                    auto* color = new wxBoxSizer(wxHORIZONTAL);
-                    color->Add(nodeFadeColorPicker_, 0, wxRIGHT, 8);
-                    for (const auto& field : {InspectorField{nodeFadeColorRLabel_, nodeFadeColorR_},
-                                              InspectorField{nodeFadeColorGLabel_, nodeFadeColorG_},
-                                              InspectorField{nodeFadeColorBLabel_, nodeFadeColorB_}}) {
-                        color->Add(field.label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-                        color->Add(field.control, 0, wxRIGHT, field.control == nodeFadeColorB_ ? 0 : 6);
-                    }
-                    form->Add(color, 1, wxEXPAND);
-                }
-                const std::initializer_list<InspectorField> fade{
-                    {nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
-                    {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}};
-                const std::initializer_list<InspectorField> nodes{
-                    {nodeAlienRaceLabel_, nodeAlienRace_}};
-                if (singlePanel) {
-                    addForm(root, form);
-                    band(root, {{nodeAlienRaceLabel_, nodeAlienRace_}});
-                    checks(root, {nodeUnskippable_});
+                                {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_},
+                                {nodeFadeColorLabel_, nodeFadeColorPicker_},
+                                {nodeFadeColorRLabel_, nodeFadeColorR_},
+                                {nodeFadeColorGLabel_, nodeFadeColorG_},
+                                {nodeFadeColorBLabel_, nodeFadeColorB_}});
                 } else {
-                    rows(form, fade);
-                    rows(form, nodes);
-                    rows(form, {{nodeUnskippablePlaceholder_, nodeUnskippable_}});
+                    // Conversation keeps its existing row order and sizing.
+                    auto* form = newForm();
+                    rows(form, {{nodeSoundLabel_, nodeSound_}, {nodeDelayLabel_, nodeDelay_},
+                                {nodeWaitFlagsLabel_, nodeWaitFlags_}, {nodeCameraAngleLabel_, nodeCameraAngle_},
+                                {nodeCameraIdLabel_, nodeCameraId_}, {nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
+                                {nodeTarHeightOffsetLabel_, nodeTarHeightOffset_}});
+                    if (nodeCameraFovLabel_->IsShown()) {
+                        form->Add(nodeCameraFovLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+                        auto* fov = new wxBoxSizer(wxHORIZONTAL);
+                        fov->Add(nodeCameraFovMode_, 0, wxRIGHT, 6);
+                        fov->Add(nodeCameraFov_, 1, wxEXPAND | wxRIGHT, 6);
+                        fov->Add(nodeCameraFovUnit_, 0, wxALIGN_CENTER_VERTICAL);
+                        form->Add(fov, 1, wxEXPAND);
+                    }
+                    rows(form, {{nodeCameraAnimationLabel_, nodeCameraAnimation_},
+                                {nodeEmotionLabel_, nodeEmotion_}, {nodeFacialAnimLabel_, nodeFacialAnim_},
+                                {nodeCamVidEffectLabel_, nodeCamVidEffectPanel_},
+                                {nodeFadeTypeLabel_, nodeFadeType_}});
+                    if (nodeFadeColorLabel_->IsShown()) {
+                        form->Add(nodeFadeColorLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+                        auto* color = new wxBoxSizer(wxHORIZONTAL);
+                        color->Add(nodeFadeColorPicker_, 0, wxRIGHT, 8);
+                        for (const auto& field : {InspectorField{nodeFadeColorRLabel_, nodeFadeColorR_},
+                                                  InspectorField{nodeFadeColorGLabel_, nodeFadeColorG_},
+                                                  InspectorField{nodeFadeColorBLabel_, nodeFadeColorB_}}) {
+                            color->Add(field.label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
+                            color->Add(field.control, 0, wxRIGHT, field.control == nodeFadeColorB_ ? 0 : 6);
+                        }
+                        form->Add(color, 1, wxEXPAND);
+                    }
+                    rows(form, {{nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
+                                {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_},
+                                {nodeAlienRaceLabel_, nodeAlienRace_},
+                                {nodeUnskippablePlaceholder_, nodeUnskippable_}});
                     addForm(root, form, 1);
                 }
                 apply(root, page, ID_ApplyPresentation);
@@ -2374,11 +2392,12 @@ private:
                 root->Add(linkHeader_, 0, wxEXPAND | wxALL, pad);
                 auto* form = newForm();
                 if (singlePanel) {
-                    band(root, {{linkActive1Label_, linkActive1_}, {linkActive2Label_, linkActive2_}});
-                    band(root, {{linkParamStrALabel_, linkParamStrA_}, {linkParamStrBLabel_, linkParamStrB_}});
+                    band(root, {{linkActive1Label_, linkActive1_}, {nullptr, linkNot1_},
+                                {linkActive2Label_, linkActive2_}, {nullptr, linkNot2_},
+                                {linkParamStrALabel_, linkParamStrA_}, {linkParamStrBLabel_, linkParamStrB_},
+                                {linkLogicLabel_, linkLogic_}, {linkDesignerNumberLabel_, linkDesignerNumber_},
+                                {nullptr, linkReverseCond_}, {nullptr, linkDisplayInactive_}});
                     delete form;
-                    checks(root, {linkNot1_, linkNot2_, linkReverseCond_, linkDisplayInactive_},
-                           {{linkLogicLabel_, linkLogic_}, {linkDesignerNumberLabel_, linkDesignerNumber_}});
                 } else {
                     rows(form, {{linkActive1Label_, linkActive1_}, {linkActive2Label_, linkActive2_},
                                 {linkLogicLabel_, linkLogic_}, {linkParamStrALabel_, linkParamStrA_},
@@ -2516,6 +2535,9 @@ private:
         // heights. Invalidate panel caches from the content outwards because
         // Layout() alone doesn't invalidate a wxWindow's cached best size.
         for (int pass = 0; pass < 2; ++pass) {
+            // FitInside may add/remove the vertical scrollbar on the first
+            // pass. Pack once more against that final visible width.
+            if (pass != 0) refreshCompactInspectorBands();
             for (auto& section : inspectorSections_) {
                 if (section.content) {
                     section.content->InvalidateBestSize();
