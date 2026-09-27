@@ -24,7 +24,6 @@
 #include <wx/choice.h>
 #include <wx/combobox.h>
 #include <wx/clipbrd.h>
-#include <wx/grid.h>
 #include <wx/icon.h>
 #include <wx/iconbndl.h>
 #include <wx/listctrl.h>
@@ -144,6 +143,68 @@ std::string linkConditionSummary(const DlgDocument& document, DlgLinkRef ref) {
     }
     return result;
 }
+
+// Small, content-sized parameter editor. A wxGrid leaves an unused canvas to
+// the right/below its cells when the inspector stretches it. Ordinary controls
+// inherit the panel theme and have no extra grid canvas (or nested scrolling).
+class IntegerParameterFields final : public wxPanel {
+public:
+    IntegerParameterFields(wxWindow* parent,
+                           const wxString& firstColumn,
+                           const wxString& secondColumn)
+        : wxPanel(parent, wxID_ANY) {
+        const std::array<wxString, 2> titles{firstColumn, secondColumn};
+        auto* form = new wxFlexGridSizer(3, FromDIP(3), FromDIP(8));
+        form->Add(0, 0);
+        for (const auto& title : titles) {
+            form->Add(new wxStaticText(this, wxID_ANY, title), 0, wxALIGN_CENTER_VERTICAL);
+        }
+        for (std::size_t row = 0; row < cells_.size(); ++row) {
+            form->Add(new wxStaticText(this, wxID_ANY,
+                wxString::Format("Param %d", static_cast<int>(row + 1))),
+                0, wxALIGN_CENTER_VERTICAL);
+            for (std::size_t column = 0; column < titles.size(); ++column) {
+                auto* field = new wxTextCtrl(this, wxID_ANY);
+                field->SetName(titles[column] + wxString::Format(
+                    " parameter %d", static_cast<int>(row + 1)));
+                cells_[row][column] = field;
+                form->Add(field, 0, wxEXPAND);
+            }
+        }
+        SetSizer(form);
+        RefreshFieldMetrics();
+    }
+
+    wxString GetCellValue(std::size_t row, std::size_t column) const {
+        return cells_.at(row).at(column)->GetValue();
+    }
+
+    void SetCellValue(std::size_t row, std::size_t column, const wxString& value) {
+        cells_.at(row).at(column)->ChangeValue(value);
+    }
+
+    void ClearValues() {
+        for (const auto& row : cells_) {
+            for (auto* field : row) field->ChangeValue(wxEmptyString);
+        }
+    }
+
+    void RefreshFieldMetrics() {
+        for (const auto& row : cells_) {
+            for (auto* field : row) {
+                // Fit a signed 32-bit value; never clamp or truncate its text.
+                const int width = field->GetTextExtent("-2147483648").x + FromDIP(20);
+                field->SetMinSize(wxSize(std::max(FromDIP(100), width), -1));
+                field->InvalidateBestSize();
+            }
+        }
+        InvalidateBestSize();
+        Layout();
+    }
+
+private:
+    std::array<std::array<wxTextCtrl*, 2>, 5> cells_{};
+};
 
 wxTextCtrl* addTextField(wxWindow* parent,
                          wxFlexGridSizer* form,
@@ -1497,7 +1558,67 @@ private:
         if (staticBox) staticBox->SetLabel(title);
     }
 
+    void refreshCompactInspectorMetrics() {
+        // Text rows, not fixed pixel heights, so DPI and font scaling still work.
+        const auto sizeText = [](wxTextCtrl* field, int rows) {
+            if (!field) return;
+            const int height = rows * std::max(1, field->GetCharHeight()) + field->FromDIP(12);
+            field->SetMinSize(wxSize(-1, height));
+        };
+        sizeText(nodeLocalText_, 3);
+        sizeText(nodeResolvedText_, 3);
+        sizeText(nodeComment_, 2);
+        sizeText(linkComment_, 2);
+        for (auto* field : compactNumericFields_) {
+            const int width = field->GetTextExtent("-2147483648").x + field->FromDIP(20);
+            field->SetMinSize(wxSize(std::max(field->FromDIP(100), width), -1));
+            field->InvalidateBestSize();
+        }
+        if (actionParamFields_) actionParamFields_->RefreshFieldMetrics();
+        if (linkParamFields_) linkParamFields_->RefreshFieldMetrics();
+    }
+
+    // Each label stays with its control. The groups sit side by side when there
+    // is room and wrap as whole groups in a narrow inspector or at larger fonts.
+    void addCompactNumericPair(wxPanel* page, wxBoxSizer* root,
+                               const wxString& firstTitle, wxStaticText*& firstLabel,
+                               wxTextCtrl*& firstField,
+                               const wxString& secondTitle, wxStaticText*& secondLabel,
+                               wxTextCtrl*& secondField) {
+        auto* row = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
+        const auto addField = [&](const wxString& title, wxStaticText*& label, wxTextCtrl*& field) {
+            auto* group = new wxBoxSizer(wxVERTICAL);
+            label = new wxStaticText(page, wxID_ANY, title);
+            field = new wxTextCtrl(page, wxID_ANY);
+            field->SetName("NeoDLG " + title);
+            field->SetMinSize(FromDIP(wxSize(110, -1)));
+            group->Add(label, 0, wxBOTTOM, FromDIP(2));
+            group->Add(field, 0, wxEXPAND);
+            row->Add(group, 0, wxRIGHT | wxBOTTOM, FromDIP(8));
+            compactNumericFields_.push_back(field);
+        };
+        addField(firstTitle, firstLabel, firstField);
+        addField(secondTitle, secondLabel, secondField);
+        root->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(6));
+    }
+
+    wxFlexGridSizer* appendInspectorForm(wxPanel* page, wxBoxSizer* root) {
+        auto* form = new wxFlexGridSizer(2, page->FromDIP(5), page->FromDIP(8));
+        form->AddGrowableCol(1, 1);
+        root->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT | wxTOP, FromDIP(6));
+        return form;
+    }
+
+    void setNodeHeader(const wxString& text) {
+        wxString singleLine = text;
+        singleLine.Replace("\r", " ");
+        singleLine.Replace("\n", " ");
+        nodeHeader_->SetLabel(singleLine);
+        nodeHeader_->SetToolTip(text);
+    }
+
     void refreshInspectorLayouts() {
+        refreshCompactInspectorMetrics();
         for (auto& section : inspectorSections_) {
             if (section.content) section.content->Layout();
             if (section.tabPage) {
@@ -1559,15 +1680,16 @@ private:
     void buildNodePage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
         wxPanel* page = makeInspectorSection(book, "Line", root);
-        nodeHeader_ = new wxTextCtrl(page, wxID_ANY, "Select a dialogue node.", wxDefaultPosition,
-                                     FromDIP(wxSize(-1, 92)),
-                                     wxTE_MULTILINE | wxTE_READONLY | wxTE_WORDWRAP | wxBORDER_NONE);
+        nodeHeader_ = new wxStaticText(page, wxID_ANY, "Select a dialogue node.", wxDefaultPosition,
+                                       wxDefaultSize, wxST_ELLIPSIZE_END | wxST_NO_AUTORESIZE);
+        nodeHeader_->SetMinSize(FromDIP(wxSize(120, -1)));
+        nodeHeader_->SetName("NeoDLG selected node");
         wxFont bold = nodeHeader_->GetFont();
         bold.SetWeight(wxFONTWEIGHT_BOLD);
         nodeHeader_->SetFont(bold);
-        root->Add(nodeHeader_, 0, wxEXPAND | wxALL, 10);
+        root->Add(nodeHeader_, 0, wxEXPAND | wxALL, FromDIP(6));
 
-        auto* form = new wxFlexGridSizer(2, 8, 8);
+        auto* form = new wxFlexGridSizer(2, FromDIP(5), FromDIP(8));
         form->AddGrowableCol(1, 1);
         nodeSpeakerLabel_ = new wxStaticText(page, wxID_ANY, "Speaker:");
         form->Add(nodeSpeakerLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -1582,25 +1704,24 @@ private:
         nodeStrRef_ = addTextField(page, form, "Text StrRef:", 0, wxDefaultSize, &nodeStrRefLabel_);
         nodeStringType_ = addTextField(page, form, "Jade string type:", 0, wxDefaultSize, &nodeStringTypeLabel_);
         nodeLocalText_ = addTextField(page, form, "Local text:", wxTE_MULTILINE,
-                                      FromDIP(wxSize(-1, 110)), &nodeLocalTextLabel_);
+                                      wxDefaultSize, &nodeLocalTextLabel_);
         nodeLocalText_->SetName("NeoDLG local text");
         nodeResolvedText_ = addTextField(page, form, "Resolved TLK text:", wxTE_MULTILINE | wxTE_READONLY,
-                                         FromDIP(wxSize(-1, 110)), &nodeResolvedTextLabel_);
+                                         wxDefaultSize, &nodeResolvedTextLabel_);
         nodeVo_ = addTextField(page, form, "Voice-over resref:", 0, wxDefaultSize, &nodeVoLabel_);
         nodeJadeSkippable_ = addCheckField(page, form, "Entry can be skipped", &nodeJadeSkippablePlaceholder_);
         nodeJadeSkippable_->SetToolTip(
             "Jade Empire Entry Skippable field. The runtime default is enabled when the field is absent.");
         nodeComment_ = addTextField(page, form, "Designer comment:", wxTE_MULTILINE,
-                                    FromDIP(wxSize(-1, 80)), &nodeCommentLabel_);
-        root->Add(form, 1, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, 10);
-        root->Add(new wxButton(page, ID_ApplyNode, "Apply Line Changes"), 0, wxALIGN_RIGHT | wxALL, 10);
+                                    wxDefaultSize, &nodeCommentLabel_);
+        root->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(6));
+        root->Add(new wxButton(page, ID_ApplyNode, "Apply Line Changes"), 0, wxALIGN_RIGHT | wxALL, FromDIP(6));
     }
 
     void buildScriptsPage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
         wxPanel* page = makeInspectorSection(book, "Scripts / Quest", root);
-        auto* form = new wxFlexGridSizer(2, 8, 8);
-        form->AddGrowableCol(1, 1);
+        auto* form = appendInspectorForm(page, root);
         nodeScript1_ = addTextField(page, form, "Action script 1:", 0, wxDefaultSize, &nodeScript1Label_);
         nodeScript2_ = addTextField(page, form, "Action script 2:", 0, wxDefaultSize, &nodeScript2Label_);
         nodeScriptCamEntry_ = addTextField(page, form, "Entry-camera script:", 0, wxDefaultSize, &nodeScriptCamEntryLabel_);
@@ -1609,26 +1730,23 @@ private:
         nodeCameraReplies_ = addTextField(page, form, "Replies camera tag:", 0, wxDefaultSize, &nodeCameraRepliesLabel_);
         nodeQuest_ = addTextField(page, form, "Quest tag:", 0, wxDefaultSize, &nodeQuestLabel_);
         nodeQuestEntry_ = addTextField(page, form, "Quest entry:", 0, wxDefaultSize, &nodeQuestEntryLabel_);
-        nodePlotIndex_ = addTextField(page, form, "Plot index:", 0, wxDefaultSize, &nodePlotIndexLabel_);
-        nodePlotXp_ = addTextField(page, form, "Plot XP percentage:", 0, wxDefaultSize, &nodePlotXpLabel_);
+        addCompactNumericPair(page, root,
+            "Plot index:", nodePlotIndexLabel_, nodePlotIndex_,
+            "Plot XP percentage:", nodePlotXpLabel_, nodePlotXp_);
+        form = appendInspectorForm(page, root);
         nodeActionStrA_ = addTextField(page, form, "Action string A:", 0, wxDefaultSize, &nodeActionStrALabel_);
         nodeActionStrB_ = addTextField(page, form, "Action string B:", 0, wxDefaultSize, &nodeActionStrBLabel_);
-        root->Add(form, 0, wxEXPAND | wxALL, 10);
 
         actionParamHeading_ = new wxStaticText(page, wxID_ANY, "Action integer parameters");
-        root->Add(actionParamHeading_, 0, wxLEFT | wxRIGHT | wxTOP, 10);
-        actionParamGrid_ = new wxGrid(page, wxID_ANY);
-        actionParamGrid_->CreateGrid(5, 2);
-        actionParamGrid_->SetColLabelValue(0, "Script 1");
-        actionParamGrid_->SetColLabelValue(1, "Script 2");
-        for (int row = 0; row < 5; ++row) actionParamGrid_->SetRowLabelValue(row, wxString::Format("Param %d", row + 1));
-        actionParamGrid_->SetMinSize(FromDIP(wxSize(420, 190)));
-        root->Add(actionParamGrid_, 0, wxEXPAND | wxALL, 10);
+        root->Add(actionParamHeading_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(6));
+        actionParamFields_ = new IntegerParameterFields(page, "Script 1", "Script 2");
+        actionParamFields_->SetName("NeoDLG action parameters");
+        root->Add(actionParamFields_, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, FromDIP(6));
         nodeCameraEntry_->SetToolTip(
             "Free-form Jade camera tag exposed to scripts; NeoDLG stores it in lowercase.");
         nodeCameraReplies_->SetToolTip(
             "Free-form Jade reply-camera tag exposed to scripts; NeoDLG stores it in lowercase.");
-        root->Add(new wxButton(page, ID_ApplyScripts, "Apply Script / Quest Changes"), 0, wxALIGN_RIGHT | wxALL, 10);
+        root->Add(new wxButton(page, ID_ApplyScripts, "Apply Script / Quest Changes"), 0, wxALIGN_RIGHT | wxALL, FromDIP(6));
     }
 
     void buildPresentationPage(wxNotebook* book) {
@@ -1640,13 +1758,14 @@ private:
             "KotOR camera, fade, delay, sound, and post-processing fields do not belong to the Jade DLG runtime schema.");
         jadePresentationNote_->Wrap(FromDIP(520));
         jadePresentationNote_->Hide();
-        root->Add(jadePresentationNote_, 0, wxEXPAND | wxALL, 10);
-        auto* form = new wxFlexGridSizer(2, 8, 8);
-        form->AddGrowableCol(1, 1);
+        root->Add(jadePresentationNote_, 0, wxEXPAND | wxALL, FromDIP(6));
+        auto* form = appendInspectorForm(page, root);
 
         nodeSound_ = addTextField(page, form, "Sound resref:", 0, wxDefaultSize, &nodeSoundLabel_);
-        nodeDelay_ = addTextField(page, form, "Delay:", 0, wxDefaultSize, &nodeDelayLabel_);
-        nodeWaitFlags_ = addTextField(page, form, "Wait flags:", 0, wxDefaultSize, &nodeWaitFlagsLabel_);
+        addCompactNumericPair(page, root,
+            "Delay:", nodeDelayLabel_, nodeDelay_,
+            "Wait flags:", nodeWaitFlagsLabel_, nodeWaitFlags_);
+        form = appendInspectorForm(page, root);
 
         nodeCameraAngleLabel_ = new wxStaticText(page, wxID_ANY, "Camera angle:");
         form->Add(nodeCameraAngleLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -1656,10 +1775,10 @@ private:
         form->Add(nodeCameraAngle_, 1, wxEXPAND);
 
         nodeCameraId_ = addTextField(page, form, "Camera ID:", 0, wxDefaultSize, &nodeCameraIdLabel_);
-        nodeCamHeightOffset_ = addTextField(page, form, "Camera height offset:", 0, wxDefaultSize,
-                                            &nodeCamHeightOffsetLabel_);
-        nodeTarHeightOffset_ = addTextField(page, form, "Target height offset:", 0, wxDefaultSize,
-                                             &nodeTarHeightOffsetLabel_);
+        addCompactNumericPair(page, root,
+            "Camera height offset:", nodeCamHeightOffsetLabel_, nodeCamHeightOffset_,
+            "Target height offset:", nodeTarHeightOffsetLabel_, nodeTarHeightOffset_);
+        form = appendInspectorForm(page, root);
 
         nodeCameraFovLabel_ = new wxStaticText(page, wxID_ANY, "Camera field of view:");
         form->Add(nodeCameraFovLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -1678,9 +1797,10 @@ private:
 
         nodeCameraAnimation_ = addTextField(page, form, "Camera animation:", 0, wxDefaultSize,
                                             &nodeCameraAnimationLabel_);
-        nodeEmotion_ = addTextField(page, form, "Emotion:", 0, wxDefaultSize, &nodeEmotionLabel_);
-        nodeFacialAnim_ = addTextField(page, form, "Facial animation:", 0, wxDefaultSize,
-                                      &nodeFacialAnimLabel_);
+        addCompactNumericPair(page, root,
+            "Emotion:", nodeEmotionLabel_, nodeEmotion_,
+            "Facial animation:", nodeFacialAnimLabel_, nodeFacialAnim_);
+        form = appendInspectorForm(page, root);
 
         nodeCamVidEffectLabel_ = new wxStaticText(page, wxID_ANY, "Camera video effect:");
         form->Add(nodeCamVidEffectLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
@@ -1738,9 +1858,8 @@ private:
         nodeFadeDelay_->SetToolTip("Seconds to wait before the fade starts. Must be zero or greater.");
         nodeFadeLength_->SetToolTip("Fade duration in seconds. Must be greater than zero.");
 
-        root->Add(form, 1, wxEXPAND | wxALL, 10);
         presentationApplyButton_ = new wxButton(page, ID_ApplyPresentation, "Apply Presentation Changes");
-        root->Add(presentationApplyButton_, 0, wxALIGN_RIGHT | wxALL, 10);
+        root->Add(presentationApplyButton_, 0, wxALIGN_RIGHT | wxALL, FromDIP(6));
 
         nodeCameraAngle_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { updateCameraControls(); });
         nodeCameraFovMode_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { updateCameraControls(); });
@@ -1941,9 +2060,9 @@ private:
         wxFont bold = linkHeader_->GetFont();
         bold.SetWeight(wxFONTWEIGHT_BOLD);
         linkHeader_->SetFont(bold);
-        root->Add(linkHeader_, 0, wxEXPAND | wxALL, 10);
+        root->Add(linkHeader_, 0, wxEXPAND | wxALL, FromDIP(6));
 
-        auto* form = new wxFlexGridSizer(2, 8, 8);
+        auto* form = new wxFlexGridSizer(2, FromDIP(5), FromDIP(8));
         form->AddGrowableCol(1, 1);
         linkActive1_ = addTextField(page, form, "Conditional script 1:", 0, wxDefaultSize, &linkActive1Label_);
         linkActive2_ = addTextField(page, form, "Conditional script 2:", 0, wxDefaultSize, &linkActive2Label_);
@@ -1951,25 +2070,21 @@ private:
         linkParamStrA_ = addTextField(page, form, "Conditional string A:", 0, wxDefaultSize, &linkParamStrALabel_);
         linkParamStrB_ = addTextField(page, form, "Conditional string B:", 0, wxDefaultSize, &linkParamStrBLabel_);
         linkComment_ = addTextField(page, form, "Link comment:", wxTE_MULTILINE,
-                                    FromDIP(wxSize(-1, 70)), &linkCommentLabel_);
+                                    wxDefaultSize, &linkCommentLabel_);
         linkDesignerNumber_ = addTextField(page, form, "Designer number available to script:", 0,
                                            wxDefaultSize, &linkDesignerNumberLabel_);
         linkNot1_ = addCheckField(page, form, "Negate conditional 1", &linkNot1Placeholder_);
         linkNot2_ = addCheckField(page, form, "Negate conditional 2", &linkNot2Placeholder_);
         linkIsChild_ = addCheckField(page, form, "IsChild link", &linkIsChildPlaceholder_);
         linkReverseCond_ = addCheckField(page, form, "Negate condition", &linkReverseCondPlaceholder_);
-        root->Add(form, 0, wxEXPAND | wxALL, 10);
+        root->Add(form, 0, wxEXPAND | wxALL, FromDIP(6));
 
         linkParamHeading_ = new wxStaticText(page, wxID_ANY, "Conditional integer parameters");
-        root->Add(linkParamHeading_, 0, wxLEFT | wxRIGHT | wxTOP, 10);
-        linkParamGrid_ = new wxGrid(page, wxID_ANY);
-        linkParamGrid_->CreateGrid(5, 2);
-        linkParamGrid_->SetColLabelValue(0, "Conditional 1");
-        linkParamGrid_->SetColLabelValue(1, "Conditional 2");
-        for (int row = 0; row < 5; ++row) linkParamGrid_->SetRowLabelValue(row, wxString::Format("Param %d", row + 1));
-        linkParamGrid_->SetMinSize(FromDIP(wxSize(420, 190)));
-        root->Add(linkParamGrid_, 0, wxEXPAND | wxALL, 10);
-        root->Add(new wxButton(page, ID_ApplyLink, "Apply Link Conditions"), 0, wxALIGN_RIGHT | wxALL, 10);
+        root->Add(linkParamHeading_, 0, wxLEFT | wxRIGHT | wxTOP, FromDIP(6));
+        linkParamFields_ = new IntegerParameterFields(page, "Conditional 1", "Conditional 2");
+        linkParamFields_->SetName("NeoDLG link parameters");
+        root->Add(linkParamFields_, 0, wxLEFT | wxRIGHT | wxTOP | wxBOTTOM, FromDIP(6));
+        root->Add(new wxButton(page, ID_ApplyLink, "Apply Link Conditions"), 0, wxALIGN_RIGHT | wxALL, FromDIP(6));
     }
 
     void buildAnimationsPage(wxNotebook* book) {
@@ -2895,9 +3010,9 @@ private:
                                  nodeActionStrB_->GetValue(), false);
             for (int i = 0; i < 5; ++i) {
                 setOptionalNodeField(document, ref, "ActionParam" + std::to_string(i + 1), FIELD_TYPE_INT,
-                                     actionParamGrid_->GetCellValue(i, 0), false);
+                                     actionParamFields_->GetCellValue(i, 0), false);
                 setOptionalNodeField(document, ref, "ActionParam" + std::to_string(i + 1) + "b", FIELD_TYPE_INT,
-                                     actionParamGrid_->GetCellValue(i, 1), false);
+                                     actionParamFields_->GetCellValue(i, 1), false);
             }
         });
     }
@@ -3034,9 +3149,9 @@ private:
                                  wxui::toWx(boolText(linkIsChild_)), true);
             for (int i = 0; i < 5; ++i) {
                 setOptionalLinkField(document, ref, "Param" + std::to_string(i + 1), FIELD_TYPE_INT,
-                                     linkParamGrid_->GetCellValue(i, 0), false);
+                                     linkParamFields_->GetCellValue(i, 0), false);
                 setOptionalLinkField(document, ref, "Param" + std::to_string(i + 1) + "b", FIELD_TYPE_INT,
-                                     linkParamGrid_->GetCellValue(i, 1), false);
+                                     linkParamFields_->GetCellValue(i, 1), false);
             }
         });
     }
@@ -3673,7 +3788,7 @@ private:
         enableInspector(valid);
         if (!valid) {
             updateDialectFieldVisibility(DlgFlavor::Kotor, DlgNodeKind::Entry);
-            nodeHeader_->ChangeValue("Select a dialogue node.");
+            setNodeHeader("Select a dialogue node.");
             linkHeader_->SetLabel("Select a linked node to edit its conditions.");
             clearInspectorControls();
             return;
@@ -3684,7 +3799,7 @@ private:
         const bool jade = document.dialect() == DlgDialect::JadeEmpire;
         const bool jadeEntry = jade && ref.kind == DlgNodeKind::Entry;
         updateDialectFieldVisibility(document.flavor(), ref.kind);
-        nodeHeader_->ChangeValue(wxui::toWx(document.nodeLabel(ref, 200)));
+        setNodeHeader(wxui::toWx(document.nodeLabel(ref, 200)));
 
         const auto parseStoredIndex = [&](const std::string& value, std::int32_t fallback) {
             if (value.empty()) return fallback;
@@ -3749,9 +3864,9 @@ private:
             loadField(nodeActionStrA_, document.nodeField(ref, "ActionParamStrA"));
             loadField(nodeActionStrB_, document.nodeField(ref, "ActionParamStrB"));
             for (int i = 0; i < 5; ++i) {
-                actionParamGrid_->SetCellValue(
+                actionParamFields_->SetCellValue(
                     i, 0, wxui::toWx(document.nodeField(ref, "ActionParam" + std::to_string(i + 1))));
-                actionParamGrid_->SetCellValue(
+                actionParamFields_->SetCellValue(
                     i, 1, wxui::toWx(document.nodeField(ref, "ActionParam" + std::to_string(i + 1) + "b")));
             }
 
@@ -3808,9 +3923,9 @@ private:
                 setBoolControl(linkNot2_, document.linkField(linkRef, "Not2"));
                 setBoolControl(linkIsChild_, document.linkField(linkRef, "IsChild"));
                 for (int i = 0; i < 5; ++i) {
-                    linkParamGrid_->SetCellValue(
+                    linkParamFields_->SetCellValue(
                         i, 0, wxui::toWx(document.linkField(linkRef, "Param" + std::to_string(i + 1))));
-                    linkParamGrid_->SetCellValue(
+                    linkParamFields_->SetCellValue(
                         i, 1, wxui::toWx(document.linkField(linkRef, "Param" + std::to_string(i + 1) + "b")));
                 }
             }
@@ -3839,7 +3954,7 @@ private:
         return {nodeSpeaker_, nodeListener_, nodeStrRef_, nodeStringType_, nodeLocalText_, nodeResolvedText_, nodeVo_,
                 nodeJadeSkippable_, nodeComment_, nodeScript1_, nodeScript2_, nodeScriptCamEntry_, nodeCameraEntry_,
                 nodeScriptCamReplies_, nodeCameraReplies_, nodeQuest_, nodeQuestEntry_, nodePlotIndex_, nodePlotXp_,
-                nodeActionStrA_, nodeActionStrB_, actionParamGrid_, nodeSound_, nodeDelay_, nodeWaitFlags_,
+                nodeActionStrA_, nodeActionStrB_, actionParamFields_, nodeSound_, nodeDelay_, nodeWaitFlags_,
                 nodeCameraAngle_, nodeCameraId_, nodeCamHeightOffset_, nodeTarHeightOffset_, nodeCameraFovMode_, nodeCameraFov_,
                 nodeCameraAnimation_, nodeEmotion_, nodeFacialAnim_, nodeCamVidEffectPanel_, nodeFadeType_, nodeFadeColorPicker_,
                 nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodePostProc_, nodeAlienRace_,
@@ -3849,7 +3964,7 @@ private:
 
     std::vector<wxWindow*> linkInspectorWindows() const {
         return {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkComment_, linkDesignerNumber_,
-                linkNot1_, linkNot2_, linkIsChild_, linkReverseCond_, linkParamGrid_};
+                linkNot1_, linkNot2_, linkIsChild_, linkReverseCond_, linkParamFields_};
     }
 
     void clearInspectorControls() {
@@ -3896,7 +4011,7 @@ private:
         for (wxCheckBox* check : {nodeJadeSkippable_, nodeUnskippable_, nodeRecordVo_, nodeRecordNoVoOverride_}) {
             if (check) check->SetValue(false);
         }
-        if (actionParamGrid_) actionParamGrid_->ClearGrid();
+        if (actionParamFields_) actionParamFields_->ClearValues();
         clearLinkControls();
         animationValues_.clear();
         if (animationList_) animationList_->DeleteAllItems();
@@ -3909,7 +4024,7 @@ private:
         for (wxTextCtrl* control : {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkComment_, linkDesignerNumber_})
             if (control) control->ChangeValue("");
         for (wxCheckBox* check : {linkNot1_, linkNot2_, linkIsChild_, linkReverseCond_}) if (check) check->SetValue(false);
-        if (linkParamGrid_) linkParamGrid_->ClearGrid();
+        if (linkParamFields_) linkParamFields_->ClearValues();
     }
 
     void refreshAnimationList() {
@@ -4135,7 +4250,7 @@ private:
         showPair(nodePlotXpLabel_, nodePlotXp_, !jade);
         showPair(nodeActionStrALabel_, nodeActionStrA_, !jade);
         showPair(nodeActionStrBLabel_, nodeActionStrB_, !jade);
-        showWindows({actionParamHeading_, actionParamGrid_}, !jade);
+        showWindows({actionParamHeading_, actionParamFields_}, !jade);
 
         if (nodeScript1Label_) {
             nodeScript1Label_->SetLabel(jade ? (jadeEntry ? "Action script:" : "Reply script:")
@@ -4181,7 +4296,7 @@ private:
         showPair(linkIsChildPlaceholder_, linkIsChild_, !jade);
         showPair(linkDesignerNumberLabel_, linkDesignerNumber_, jade);
         showPair(linkReverseCondPlaceholder_, linkReverseCond_, jade);
-        showWindows({linkParamHeading_, linkParamGrid_}, !jade);
+        showWindows({linkParamHeading_, linkParamFields_}, !jade);
         if (linkActive1Label_) linkActive1Label_->SetLabel(jade ? "Condition script:" : "Conditional script 1:");
 
         setInspectorSectionTitle(0, jadeEntry ? "Entry Line" : (jade ? "Reply Line" : "Line"));
@@ -4310,7 +4425,8 @@ private:
     std::vector<DlgNodeRef> searchResults_;
     std::size_t searchIndex_ = 0;
 
-    wxTextCtrl* nodeHeader_ = nullptr;
+    wxStaticText* nodeHeader_ = nullptr;
+    std::vector<wxTextCtrl*> compactNumericFields_;
     wxStaticText* nodeSpeakerLabel_ = nullptr;
     wxStaticText* nodeListenerLabel_ = nullptr;
     wxStaticText* nodeStrRefLabel_ = nullptr;
@@ -4355,7 +4471,7 @@ private:
     wxTextCtrl* nodePlotXp_ = nullptr;
     wxTextCtrl* nodeActionStrA_ = nullptr;
     wxTextCtrl* nodeActionStrB_ = nullptr;
-    wxGrid* actionParamGrid_ = nullptr;
+    IntegerParameterFields* actionParamFields_ = nullptr;
 
     wxStaticText* jadePresentationNote_ = nullptr;
     wxButton* presentationApplyButton_ = nullptr;
@@ -4452,7 +4568,7 @@ private:
     wxStaticText* linkReverseCondPlaceholder_ = nullptr;
     wxCheckBox* linkReverseCond_ = nullptr;
     wxStaticText* linkParamHeading_ = nullptr;
-    wxGrid* linkParamGrid_ = nullptr;
+    IntegerParameterFields* linkParamFields_ = nullptr;
 
     wxListCtrl* animationList_ = nullptr;
     wxButton* animationAddButton_ = nullptr;
