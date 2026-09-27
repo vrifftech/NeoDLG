@@ -5,6 +5,7 @@
 #include "core/Version.hpp"
 #include "neodlg/model/DlgDocument.hpp"
 #include "neodlg/model/DlgFieldApplicability.hpp"
+#include "neodlg/model/DlgTreeVisibility.hpp"
 #include "neodlg/model/DlgSemanticOptions.hpp"
 #include "neodlg/patcher/DlgPatcher.hpp"
 
@@ -212,6 +213,15 @@ public:
         for (int row = 0; row < 5; ++row)
             grid_->SetRowLabelValue(row, wxString::Format("Param %d", row + 1));
         grid_->SetMinSize(FromDIP(wxSize(420, 190)));
+        grid_->Bind(wxEVT_GRID_CELL_CHANGED, [this](wxGridEvent& event) {
+            const int row = event.GetRow(), column = event.GetCol();
+            if (row >= 0 && row < 5 && column >= 0 && column < 2)
+                gridEdited_[static_cast<std::size_t>(row)][static_cast<std::size_t>(column)] = true;
+            event.Skip();
+            wxCommandEvent changed(wxEVT_TEXT, GetId());
+            changed.SetEventObject(this);
+            GetEventHandler()->ProcessEvent(changed);
+        });
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(grid_, 1, wxEXPAND);
         root->Add(compactSizer_, 0, wxEXPAND);
@@ -228,7 +238,7 @@ public:
                 if (singlePanel) {
                     auto* field = cells_[row][column];
                     const wxString value = grid_->GetCellValue(static_cast<int>(row), static_cast<int>(column));
-                    const bool changed = field->IsModified() || field->GetValue() != value;
+                    const bool changed = field->IsModified() || gridEdited_[row][column] || field->GetValue() != value;
                     field->ChangeValue(value);
                     if (changed) field->MarkDirty();
                 } else
@@ -239,7 +249,7 @@ public:
         singlePanel_ = singlePanel;
         grid_->Show(!singlePanel);
         compactSizer_->ShowItems(singlePanel);
-        SetCompactColumns(compactColumns_[0], compactColumns_[1]);
+        SetVisibleColumns(compactColumns_[0], compactColumns_[1]);
         RefreshFieldMetrics();
     }
 
@@ -259,6 +269,7 @@ public:
             grid_->DisableCellEditControl();
         }
         field->ChangeValue(value);
+        gridEdited_[row][column] = false;
         grid_->SetCellValue(static_cast<int>(row), static_cast<int>(column), value);
     }
 
@@ -268,18 +279,22 @@ public:
                 SetCellValue(row, column, wxEmptyString);
     }
 
-    void SetCompactColumns(bool first, bool second) {
-        compactColumns_ = {first, second};
-        if (!singlePanel_) return;
+    void SetVisibleColumns(bool first, bool second) {
+        const std::array<bool, 2> columns{first, second};
+        if (columns != compactColumns_) CommitGridEditor();
+        compactColumns_ = columns;
         for (std::size_t column = 0; column < compactColumns_.size(); ++column) {
-            compactTitles_[column]->Show(compactColumns_[column]);
-            compactSizer_->Show(compactRows_[column], compactColumns_[column]);
+            const bool show = compactColumns_[column];
+            if (show) grid_->ShowCol(static_cast<int>(column));
+            else grid_->HideCol(static_cast<int>(column));
+            compactTitles_[column]->Show(singlePanel_ && show);
+            compactSizer_->Show(compactRows_[column], singlePanel_ && show);
         }
         InvalidateBestSize();
     }
 
-    bool CompactColumnShown(std::size_t column) const {
-        return !singlePanel_ || compactColumns_.at(column);
+    bool ColumnShown(std::size_t column) const {
+        return compactColumns_.at(column);
     }
 
     bool HasPendingOrNonzeroValue(std::size_t column) const {
@@ -287,7 +302,7 @@ public:
             const auto* cell = cells_[row][column];
             wxString value = GetCellValue(row, column);
             value.Trim(true).Trim(false);
-            if (cell->IsModified() || (!value.empty() && value != "0")) return true;
+            if (cell->IsModified() || gridEdited_[row][column] || (!value.empty() && value != "0")) return true;
         }
         return false;
     }
@@ -343,6 +358,7 @@ private:
         }
     }
     std::array<std::array<wxTextCtrl*, 2>, 5> cells_{};
+    std::array<std::array<bool, 2>, 5> gridEdited_{};
     std::array<std::array<wxStaticText*, 2>, 5> compactLabels_{};
     std::array<wxStaticText*, 2> compactTitles_{};
     std::array<wxFlexGridSizer*, 2> compactRows_{};
@@ -1788,14 +1804,14 @@ private:
         });
         singleInspectorSizer_ = new wxBoxSizer(wxVERTICAL);
         singleInspector_->SetSizer(singleInspectorSizer_);
-        singlePanelOptional_ = new wxCheckBox(singleInspector_, wxID_ANY, "Show optional fields");
-        singlePanelOptional_->SetName("NeoDLG single panel optional fields");
-        singlePanelOptional_->SetToolTip(
-            "Reveal unused parameter groups and preserved/uncertain fields in Single Panel. "
+        optionalFields_ = new wxCheckBox(inspectorHost_, wxID_ANY, "Show optional fields");
+        optionalFields_->SetName("NeoDLG optional fields");
+        optionalFields_->SetToolTip(
+            "Reveal unused parameter groups and preserved/uncertain fields in all dialogue views. "
             "Does not restore removed authoring controls or modify the document.");
-        singleInspectorSizer_->Add(singlePanelOptional_, 0, wxALL, FromDIP(4));
-        singlePanelOptional_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-            refreshContextualInspector();
+        inspectorHostSizer->Add(optionalFields_, 0, wxALL, FromDIP(4));
+        optionalFields_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            setShowOptionalFields(optionalFields_->GetValue());
         });
         singleInspector_->Hide();
         inspectorHostSizer->Add(inspectorBook_, 1, wxEXPAND);
@@ -1837,7 +1853,7 @@ private:
         }
         nodeFadeType_->Bind(wxEVT_CHOICE, [this](wxCommandEvent& event) {
             event.Skip();
-            singlePanelFadeTypeEdited_ = true;
+            inspectorFadeTypeEdited_ = true;
             queueContextualInspectorRefresh();
         });
     }
@@ -2159,7 +2175,7 @@ private:
 
     // Rebuild sizers, not controls. Editing state, undo buffers, validators,
     // event bindings and selection therefore survive a workspace-view change.
-    // Only these five inspector sections participate; dialogs/GFF are untouched.
+    // Only the five semantic sections are laid out here; GFF has a separate row filter.
     void rebuildInspectorForms(bool singlePanel) {
         if (inspectorSections_.size() != 5) return;
         refreshCompactInspectorMetrics();
@@ -2176,6 +2192,7 @@ private:
             return form;
         };
         const auto row = [&](wxFlexGridSizer* form, const InspectorField& field) {
+            if (!singlePanel && (!field.label->IsShown() || !field.control->IsShown())) return;
             form->Add(field.label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
                       singlePanel ? FromDIP(3) : 8);
             wxWindow* control = inspectorFieldWindow(field.control);
@@ -2194,6 +2211,7 @@ private:
             for (const auto& field : fields) row(form, field);
         };
         const auto addForm = [&](wxSizer* root, wxSizer* form, int stretch = 0) {
+            if (form->GetItemCount() == 0) { delete form; return; }
             auto* item = root->Add(form, stretch, wxEXPAND | wxALL, pad);
             if (singlePanel) compactInspectorRows_.push_back(item);
         };
@@ -2227,6 +2245,7 @@ private:
             root->Add(page->FindWindow(id), 0, wxALIGN_RIGHT | wxALL, pad);
         };
         const auto parameters = [&](wxSizer* root, wxWindow* title, IntegerParameterFields* fields) {
+            if (!singlePanel && !fields->IsShown()) return;
             root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, pad);
             root->Add(fields, 0, wxEXPAND | wxALL, pad);
         };
@@ -2303,12 +2322,14 @@ private:
                 } else rows(form, {{nodeCameraIdLabel_, nodeCameraId_},
                                    {nodeCamHeightOffsetLabel_, nodeCamHeightOffset_},
                                    {nodeTarHeightOffsetLabel_, nodeTarHeightOffset_}});
-                form->Add(nodeCameraFovLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, singlePanel ? FromDIP(3) : 8);
-                auto* fov = new wxBoxSizer(wxHORIZONTAL);
-                fov->Add(nodeCameraFovMode_, 0, wxRIGHT, 6);
-                fov->Add(nodeCameraFov_, singlePanel ? 0 : 1, wxEXPAND | wxRIGHT, 6);
-                fov->Add(nodeCameraFovUnit_, 0, wxALIGN_CENTER_VERTICAL);
-                form->Add(fov, 1, wxEXPAND);
+                if (singlePanel || nodeCameraFovLabel_->IsShown()) {
+                    form->Add(nodeCameraFovLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, singlePanel ? FromDIP(3) : 8);
+                    auto* fov = new wxBoxSizer(wxHORIZONTAL);
+                    fov->Add(nodeCameraFovMode_, 0, wxRIGHT, 6);
+                    fov->Add(nodeCameraFov_, singlePanel ? 0 : 1, wxEXPAND | wxRIGHT, 6);
+                    fov->Add(nodeCameraFovUnit_, 0, wxALIGN_CENTER_VERTICAL);
+                    form->Add(fov, 1, wxEXPAND);
+                }
                 if (singlePanel) {
                     addForm(root, form);
                     form = newForm();
@@ -2322,21 +2343,23 @@ private:
                                 {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}}, 3);
                     form = newForm();
                 } else row(form, {nodeFadeTypeLabel_, nodeFadeType_});
-                form->Add(nodeFadeColorLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, singlePanel ? FromDIP(3) : 8);
-                auto* color = new wxBoxSizer(wxHORIZONTAL);
-                color->Add(nodeFadeColorPicker_, 0, wxRIGHT, 8);
-                for (const auto& field : {InspectorField{nodeFadeColorRLabel_, nodeFadeColorR_},
-                                          InspectorField{nodeFadeColorGLabel_, nodeFadeColorG_},
-                                          InspectorField{nodeFadeColorBLabel_, nodeFadeColorB_}}) {
-                    color->Add(field.label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
-                    color->Add(field.control, 0, wxRIGHT, field.control == nodeFadeColorB_ ? 0 : 6);
+                if (singlePanel || nodeFadeColorLabel_->IsShown()) {
+                    form->Add(nodeFadeColorLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, singlePanel ? FromDIP(3) : 8);
+                    auto* color = new wxBoxSizer(wxHORIZONTAL);
+                    color->Add(nodeFadeColorPicker_, 0, wxRIGHT, 8);
+                    for (const auto& field : {InspectorField{nodeFadeColorRLabel_, nodeFadeColorR_},
+                                              InspectorField{nodeFadeColorGLabel_, nodeFadeColorG_},
+                                              InspectorField{nodeFadeColorBLabel_, nodeFadeColorB_}}) {
+                        color->Add(field.label, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 3);
+                        color->Add(field.control, 0, wxRIGHT, field.control == nodeFadeColorB_ ? 0 : 6);
+                    }
+                    form->Add(color, 1, wxEXPAND);
                 }
-                form->Add(color, 1, wxEXPAND);
                 const std::initializer_list<InspectorField> fade{
                     {nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
                     {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}};
                 const std::initializer_list<InspectorField> nodes{
-                    {nodePostProcLabel_, nodePostProc_}, {nodeAlienRaceLabel_, nodeAlienRace_}};
+                    {nodeAlienRaceLabel_, nodeAlienRace_}};
                 if (singlePanel) {
                     addForm(root, form);
                     band(root, {{nodeAlienRaceLabel_, nodeAlienRace_}});
@@ -2344,9 +2367,7 @@ private:
                 } else {
                     rows(form, fade);
                     rows(form, nodes);
-                    rows(form, {{nodeUnskippablePlaceholder_, nodeUnskippable_},
-                                {nodeRecordVoPlaceholder_, nodeRecordVo_},
-                                {nodeRecordNoVoPlaceholder_, nodeRecordNoVoOverride_}});
+                    rows(form, {{nodeUnskippablePlaceholder_, nodeUnskippable_}});
                     addForm(root, form, 1);
                 }
                 apply(root, page, ID_ApplyPresentation);
@@ -2362,12 +2383,14 @@ private:
                 } else {
                     rows(form, {{linkActive1Label_, linkActive1_}, {linkActive2Label_, linkActive2_},
                                 {linkLogicLabel_, linkLogic_}, {linkParamStrALabel_, linkParamStrA_},
-                                {linkParamStrBLabel_, linkParamStrB_}, {linkCommentLabel_, linkComment_},
+                                {linkParamStrBLabel_, linkParamStrB_},
                                 {linkDesignerNumberLabel_, linkDesignerNumber_}, {linkNot1Placeholder_, linkNot1_},
-                                {linkNot2Placeholder_, linkNot2_}, {linkIsChildPlaceholder_, linkIsChild_},
+                                {linkNot2Placeholder_, linkNot2_},
                                 {linkReverseCondPlaceholder_, linkReverseCond_}});
                     addForm(root, form);
                 }
+                if (!singlePanel && linkDisplayInactive_->IsShown())
+                    root->Add(linkDisplayInactive_, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad);
                 parameters(root, linkParamHeading_, linkParamFields_);
                 apply(root, page, ID_ApplyLink);
             } else {
@@ -3034,11 +3057,21 @@ private:
         auto* filterRow = new wxBoxSizer(wxHORIZONTAL);
         filterRow->Add(new wxStaticText(page, wxID_ANY, "Filter GFF fields:"), 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 6);
         rawFilter_ = new wxTextCtrl(page, wxID_ANY);
+        rawFilter_->SetName("NeoDLG GFF filter");
         filterRow->Add(rawFilter_, 1);
+        rawOptional_ = new wxCheckBox(page, wxID_ANY, "Show optional fields");
+        rawOptional_->SetName("NeoDLG GFF optional fields");
+        rawOptional_->SetValue(optionalFields_ && optionalFields_->GetValue());
+        rawOptional_->SetToolTip("Reveal context-hidden fields, but not removed authoring fields. No stored data is deleted.");
+        filterRow->Add(rawOptional_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
+        rawOptional_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
+            setShowOptionalFields(rawOptional_->GetValue());
+        });
         root->Add(filterRow, 0, wxEXPAND | wxBOTTOM, 6);
 
         rawTree_ = new wxTreeCtrl(page, ID_RawTree, wxDefaultPosition, wxDefaultSize,
                                   wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE);
+        rawTree_->SetName("NeoDLG GFF tree");
         root->Add(rawTree_, 1, wxEXPAND);
         page->SetSizer(root);
         parent->AddPage(page, "GFF Tree", false);
@@ -3854,7 +3887,7 @@ private:
                 }
             } else {
                 if (ref.kind == DlgNodeKind::Entry || document.hasNodeField(ref, "Speaker") ||
-                    (singlePanelActive_ && !nodeSpeaker_->GetValue().empty()))
+                    !nodeSpeaker_->GetValue().empty())
                     setOptionalNodeField(document, ref, "Speaker", FIELD_TYPE_CEXOSTRING, nodeSpeaker_->GetValue(), true);
                 setOptionalNodeField(document, ref, "Listener", FIELD_TYPE_CEXOSTRING, nodeListener_->GetValue(), false);
                 setOptionalNodeField(document, ref, "VO_ResRef", FIELD_TYPE_RESREF, nodeVo_->GetValue(), false);
@@ -3864,7 +3897,7 @@ private:
     }
 
     void onApplyScripts(wxCommandEvent&) {
-        if (singlePanelActive_) refreshContextualInspector();
+        refreshContextualInspector();
         if (!activeDocument().selectedNode) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
         mutate("Edit dialogue scripts", [this, ref]() {
@@ -3921,7 +3954,7 @@ private:
     }
 
     void onApplyPresentation(wxCommandEvent&) {
-        if (singlePanelActive_) refreshContextualInspector();
+        refreshContextualInspector();
         if (!activeDocument().selectedNode) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
         mutate("Edit dialogue presentation", [this, ref]() {
@@ -3946,16 +3979,9 @@ private:
                         trimAscii(wxui::toStd(nodeCameraId_->GetValue())));
                     setOptionalNodeField(document, ref, "CameraID", FIELD_TYPE_INT,
                                          wxString::Format("%d", cameraId), true);
-                } else if (singlePanelActive_) {
-                    if (nodeCameraId_->IsShown() && nodeCameraId_->IsModified())
-                        setOptionalNodeField(document, ref, "CameraID", FIELD_TYPE_INT,
-                                             nodeCameraId_->GetValue(), false);
-                } else if (cameraAngle == "0" || cameraAngle == "1" ||
-                           cameraAngle == "2" || cameraAngle == "3") {
-                    if (document.hasNodeField(ref, "CameraID")) {
-                        document.setNodeField(ref, "CameraID", FIELD_TYPE_INT, "-1");
-                    }
-                } else if (document.hasNodeField(ref, "CameraID") || nodeCameraId_->IsModified()) {
+                } else if (nodeCameraId_->IsShown() && nodeCameraId_->IsModified()) {
+                    // An inactive camera ID is preserved in either layout.
+                    // The optional override permits an intentional edit only.
                     setOptionalNodeField(document, ref, "CameraID", FIELD_TYPE_INT,
                                          nodeCameraId_->GetValue(), false);
                 }
@@ -3964,7 +3990,7 @@ private:
                                                   wxTextCtrl* control,
                                                   const std::string& fieldName,
                                                   const std::function<void(float)>& validate) {
-                    if (singlePanelActive_ && !control->IsShown()) return;
+                    if (!control->IsShown()) return;
                     const auto value = parseOptionalFiniteFloat(control, fieldName);
                     if (!value) return;
                     validate(*value);
@@ -3978,8 +4004,10 @@ private:
                                  [](float) {});
 
                 if (loadedCameraFovPresent_ || nodeCameraFovMode_->GetSelection() != 0) {
-                    setOptionalNodeField(document, ref, "CamFieldOfView", FIELD_TYPE_FLOAT,
-                                         wxui::toWx(cameraFovValue()), true);
+                    const auto fov = cameraFovValue();
+                    if (!loadedCameraFovPresent_ || fov != loadedCameraFovRaw_ || nodeCameraFov_->IsModified())
+                        setOptionalNodeField(document, ref, "CamFieldOfView", FIELD_TYPE_FLOAT,
+                                             wxui::toWx(fov), true);
                 }
 
                 const std::int32_t videoEffect = cameraVideoEffectValue(flavor);
@@ -3996,7 +4024,7 @@ private:
                 }
 
                 if ((loadedFadeColorPresent_ || fadeColorEdited_) &&
-                    (!singlePanelActive_ || nodeFadeColorPicker_->IsShown())) {
+                    nodeFadeColorPicker_->IsShown()) {
                     setOptionalNodeField(document, ref, "FadeColor", FIELD_TYPE_POSITION,
                                          wxui::toWx(fadeColorValue()), true);
                 }
@@ -4012,19 +4040,14 @@ private:
             setOptionalNodeField(document, ref, "CameraAnimation", FIELD_TYPE_WORD, nodeCameraAnimation_->GetValue(), false);
             setOptionalNodeField(document, ref, "Emotion", FIELD_TYPE_INT, nodeEmotion_->GetValue(), false);
             setOptionalNodeField(document, ref, "FacialAnim", FIELD_TYPE_INT, nodeFacialAnim_->GetValue(), false);
-            setOptionalNodeField(document, ref, "PostProcNode", FIELD_TYPE_INT, nodePostProc_->GetValue(), false);
             setOptionalNodeField(document, ref, "AlienRaceNode", FIELD_TYPE_INT, nodeAlienRace_->GetValue(), false);
             setOptionalNodeField(document, ref, "NodeUnskippable", FIELD_TYPE_INT,
                                  wxui::toWx(boolText(nodeUnskippable_)), document.hasNodeField(ref, "NodeUnskippable"));
-            setOptionalNodeField(document, ref, "RecordVO", FIELD_TYPE_INT,
-                                 wxui::toWx(boolText(nodeRecordVo_)), document.hasNodeField(ref, "RecordVO"));
-            setOptionalNodeField(document, ref, "RecordNoVOOverri", FIELD_TYPE_INT,
-                                 wxui::toWx(boolText(nodeRecordNoVoOverride_)), document.hasNodeField(ref, "RecordNoVOOverri"));
         });
     }
 
     void onApplyLink(wxCommandEvent&) {
-        if (singlePanelActive_) refreshContextualInspector();
+        refreshContextualInspector();
         if (!activeDocument().selectedLink) return;
         const DlgLinkRef ref = *activeDocument().selectedLink;
         mutate("Edit dialogue link conditions", [this, ref]() {
@@ -4043,8 +4066,8 @@ private:
             }
 
             // Do not normalize an unusual existing BYTE just by pressing Apply.
-            if (singlePanelActive_ && linkDisplayInactive_->IsShown() && linkDisplayInactiveEdited_ &&
-                singlePanelReplyChoiceLink(document, activeDocument().selectedNode, ref)) {
+            if (linkDisplayInactive_->IsShown() && linkDisplayInactiveEdited_ &&
+                inspectorReplyChoiceLink(document, activeDocument().selectedNode, ref)) {
                 setOptionalLinkField(document, ref, "DisplayInactive", FIELD_TYPE_BYTE,
                                      wxui::toWx(boolText(linkDisplayInactive_)), true);
             }
@@ -4056,14 +4079,10 @@ private:
                                  linkParamStrA_->GetValue(), false);
             setOptionalLinkField(document, ref, "ParamStrB", FIELD_TYPE_CEXOSTRING,
                                  linkParamStrB_->GetValue(), false);
-            setOptionalLinkField(document, ref, "LinkComment", FIELD_TYPE_CEXOSTRING,
-                                 linkComment_->GetValue(), false);
             setOptionalLinkField(document, ref, "Not", FIELD_TYPE_BYTE,
                                  wxui::toWx(boolText(linkNot1_)), document.hasLinkField(ref, "Not"));
             setOptionalLinkField(document, ref, "Not2", FIELD_TYPE_BYTE,
                                  wxui::toWx(boolText(linkNot2_)), document.hasLinkField(ref, "Not2"));
-            setOptionalLinkField(document, ref, "IsChild", FIELD_TYPE_BYTE,
-                                 wxui::toWx(boolText(linkIsChild_)), true);
             for (int i = 0; i < 5; ++i) {
                 setOptionalLinkField(document, ref, "Param" + std::to_string(i + 1), FIELD_TYPE_INT,
                                      linkParamFields_->GetCellValue(i, 0), false);
@@ -4079,7 +4098,7 @@ private:
                               std::uint32_t type,
                               const wxString& value,
                               bool createEvenIfEmpty) {
-        if (!singlePanelAllowsNodeWrite(label)) return;
+        if (!inspectorAllowsNodeWrite(label)) return;
         const std::string text = wxui::toStd(value);
         if (!document.hasNodeField(ref, label) && text.empty() && !createEvenIfEmpty) return;
         document.setNodeField(ref, label, type,
@@ -4092,7 +4111,7 @@ private:
                               std::uint32_t type,
                               const wxString& value,
                               bool createEvenIfEmpty) {
-        if (!singlePanelAllowsLinkWrite(label)) return;
+        if (!inspectorAllowsLinkWrite(label)) return;
         const std::string text = wxui::toStd(value);
         if (!document.hasLinkField(ref, label) && text.empty() && !createEvenIfEmpty) return;
         document.setLinkField(ref, label, type,
@@ -4860,13 +4879,13 @@ private:
             clearLinkControls();
         }
         linkDisplayInactiveEdited_ = false;
-        singlePanelFadeTypeEdited_ = false;
+        inspectorFadeTypeEdited_ = false;
         if (hasLink) setBoolControl(linkDisplayInactive_,
             document.linkField(*activeDocument().selectedLink, "DisplayInactive"));
         else linkDisplayInactive_->SetValue(false);
         // This policy is read-only and is refreshed once per selection/model
         // change, not every mouse wheel, keystroke, font or viewport event.
-        singlePanelFlavor_ = singlePanelFieldFlavor(document);
+        inspectorFlavor_ = inspectorFieldFlavor(document);
         refreshAnimationList();
         refreshContextualInspector();
     }
@@ -5068,7 +5087,12 @@ private:
 
         const std::string filter = lowerAscii(activeDocument().rawFilterTerm);
         if (model().loaded()) {
+            const auto document = dialogue();
+            const DlgTreeFieldVisibility visibility(document, showOptionalFields());
             for (const auto& row : model().rows()) {
+                // Filter the display projection only. Keep original GFF paths,
+                // list indices and model data; never renumber or delete fields.
+                if (!visibility.visible(row.path)) continue;
                 if (!filter.empty()) {
                     const std::string haystack = lowerAscii(
                         row.path + " " + row.label + " " + row.type + " " + row.value + " " + row.resolved);
@@ -5134,6 +5158,8 @@ private:
         }
 
         const GffFieldRow row = rawRows_[static_cast<std::size_t>(data->rowIndex())];
+        const auto document = dialogue();
+        if (!DlgTreeFieldVisibility(document, showOptionalFields()).visible(row.path)) return;
         if (!row.editable) {
             if (rawTree_->ItemHasChildren(item)) {
                 if (rawTree_->IsExpanded(item)) rawTree_->Collapse(item);
@@ -5147,8 +5173,19 @@ private:
         mutate("Edit GFF value", [this, row, value]() { model().setValue(row.path, *value); });
     }
 
+    bool showOptionalFields() const {
+        return optionalFields_ && optionalFields_->GetValue();
+    }
+
+    void setShowOptionalFields(bool show) {
+        if (optionalFields_) optionalFields_->SetValue(show);
+        if (rawOptional_) rawOptional_->SetValue(show);
+        refreshContextualInspector();
+        if (hasActiveDocument()) refreshRawTree();
+    }
+
     void queueContextualInspectorRefresh() {
-        if (!singlePanelActive_ || contextRefreshPending_ || IsBeingDeleted()) return;
+        if (contextRefreshPending_ || IsBeingDeleted()) return;
         contextRefreshPending_ = true;
         CallAfter([this]() {
             contextRefreshPending_ = false;
@@ -5166,11 +5203,11 @@ private:
             updateCameraControls();
     }
 
-    void applySinglePanelContextVisibility() {
-        // Always undo single-view visibility before returning to Conversation.
+    void applyInspectorContextVisibility() {
+        // Applicability is shared by both semantic presentations. Compact
+        // sizing/reparenting remains exclusively a Single Panel concern.
         for (auto& section : inspectorSections_) section.singleHost->Show(true);
         if (auto* button = FindWindow(ID_ApplyLink)) button->Show(true);
-        if (!singlePanelActive_) return;
         const auto pair = [this](wxWindow* label, wxWindow* field, bool show) {
             if (label) label->Show(show);
             if (field) {
@@ -5187,8 +5224,8 @@ private:
             return !text.empty() || field->IsModified();
         };
 
-        // These controls have been deliberately removed from Single Panel, not
-        // from the document. Show optional fields must not resurrect them.
+        // Removed in every presentation, never from the serialized document.
+        // Show optional fields must not resurrect these authoring controls.
         pair(nodePostProcLabel_, nodePostProc_, false);
         pair(nodeRecordVoPlaceholder_, nodeRecordVo_, false);
         pair(nodeRecordNoVoPlaceholder_, nodeRecordNoVoOverride_, false);
@@ -5206,24 +5243,24 @@ private:
         const auto document = dialogue();
         const auto ref = *activeDocument().selectedNode;
         const bool jade = document.dialect() == DlgDialect::JadeEmpire;
-        const bool optional = singlePanelOptional_ && singlePanelOptional_->GetValue();
+        const bool optional = showOptionalFields();
         // No synthetic K1/K2 restriction is applied to Jade's own schema.
-        const bool k2 = !jade && (singlePanelFlavor_ == DlgFlavor::Kotor2 || optional);
+        const bool k2 = !jade && (inspectorFlavor_ == DlgFlavor::Kotor2 || optional);
         if (!jade) {
             pair(nodeScript2Label_, nodeScript2_, k2 || hasText(nodeScript2_));
-            const auto parameters = singlePanelParameterVisibility(k2, optional,
+            const auto parameters = inspectorParameterVisibility(k2, optional,
                 hasText(nodeScript1_), hasText(nodeScript2_),
                 {hasText(nodeActionStrA_) || actionParamFields_->HasPendingOrNonzeroValue(0),
                  hasText(nodeActionStrB_) || actionParamFields_->HasPendingOrNonzeroValue(1)});
             const bool first = parameters.first, second = parameters.second;
             pair(nodeActionStrALabel_, nodeActionStrA_, first);
             pair(nodeActionStrBLabel_, nodeActionStrB_, second);
-            actionParamFields_->SetCompactColumns(first, second);
+            actionParamFields_->SetVisibleColumns(first, second);
             windows({actionParamHeading_, actionParamFields_}, first || second);
             pair(nodeQuestEntryLabel_, nodeQuestEntry_, optional || hasText(nodeQuest_) || hasText(nodeQuestEntry_));
             // Sound is verified in K1. Preserve populated/edited K2 legacy data;
             // reveal otherwise-unused legacy fields only through the override.
-            pair(nodeSoundLabel_, nodeSound_, singlePanelFlavor_ != DlgFlavor::Kotor2 ||
+            pair(nodeSoundLabel_, nodeSound_, inspectorFlavor_ != DlgFlavor::Kotor2 ||
                                              optional || hasText(nodeSound_));
             pair(nodeEmotionLabel_, nodeEmotion_, k2 || hasText(nodeEmotion_));
             pair(nodeFacialAnimLabel_, nodeFacialAnim_, k2 || hasText(nodeFacialAnim_));
@@ -5242,7 +5279,7 @@ private:
             const bool authoredFade = document.hasNodeField(ref, "FadeColor") ||
                 document.hasNodeField(ref, "FadeDelay") || document.hasNodeField(ref, "FadeLength");
             const bool fadeDetails = optional || authoredFade || fade != "0" ||
-                singlePanelFadeTypeEdited_ || fadeColorEdited_ ||
+                inspectorFadeTypeEdited_ || fadeColorEdited_ ||
                 nodeFadeDelay_->IsModified() || nodeFadeLength_->IsModified();
             windows({nodeFadeColorLabel_, nodeFadeColorPicker_, nodeFadeColorRLabel_, nodeFadeColorR_,
                      nodeFadeColorGLabel_, nodeFadeColorG_, nodeFadeColorBLabel_, nodeFadeColorB_,
@@ -5270,22 +5307,21 @@ private:
             pair(linkLogicLabel_, linkLogic_, k2 || hasText(linkLogic_));
             pair(linkNot1Placeholder_, linkNot1_, k2 || linkNot1_->GetValue());
             pair(linkNot2Placeholder_, linkNot2_, k2 || linkNot2_->GetValue());
-            const auto parameters = singlePanelParameterVisibility(k2, optional,
+            const auto parameters = inspectorParameterVisibility(k2, optional,
                 hasText(linkActive1_), hasText(linkActive2_),
                 {hasText(linkParamStrA_) || linkParamFields_->HasPendingOrNonzeroValue(0),
                  hasText(linkParamStrB_) || linkParamFields_->HasPendingOrNonzeroValue(1)});
             const bool first = parameters.first, second = parameters.second;
             pair(linkParamStrALabel_, linkParamStrA_, first);
             pair(linkParamStrBLabel_, linkParamStrB_, second);
-            linkParamFields_->SetCompactColumns(first, second);
+            linkParamFields_->SetVisibleColumns(first, second);
             windows({linkParamHeading_, linkParamFields_}, first || second);
-            linkDisplayInactive_->Show(singlePanelReplyChoiceLink(document, ref, link));
+            linkDisplayInactive_->Show(inspectorReplyChoiceLink(document, ref, link));
         }
     }
 
-    bool singlePanelAllowsNodeWrite(const std::string& label) const {
-        if (!singlePanelActive_) return true;
-        if (isRemovedSinglePanelField(label)) return false;
+    bool inspectorAllowsNodeWrite(const std::string& label) const {
+        if (isRemovedInspectorField(label)) return false;
         const std::initializer_list<std::pair<const char*, wxWindow*>> fields{
             {"Script2", nodeScript2_}, {"ActionParamStrA", nodeActionStrA_}, {"ActionParamStrB", nodeActionStrB_},
             {"QuestEntry", nodeQuestEntry_}, {"Sound", nodeSound_}, {"CameraID", nodeCameraId_},
@@ -5296,15 +5332,14 @@ private:
         for (const auto& field : fields) if (label == field.first) return field.second->IsShown();
         for (int i = 1; i <= 5; ++i) {
             const std::string base = "ActionParam" + std::to_string(i);
-            if (label == base) return actionParamFields_->IsShown() && actionParamFields_->CompactColumnShown(0);
-            if (label == base + "b") return actionParamFields_->IsShown() && actionParamFields_->CompactColumnShown(1);
+            if (label == base) return actionParamFields_->IsShown() && actionParamFields_->ColumnShown(0);
+            if (label == base + "b") return actionParamFields_->IsShown() && actionParamFields_->ColumnShown(1);
         }
         return true;
     }
 
-    bool singlePanelAllowsLinkWrite(const std::string& label) const {
-        if (!singlePanelActive_) return true;
-        if (isRemovedSinglePanelField(label)) return false;
+    bool inspectorAllowsLinkWrite(const std::string& label) const {
+        if (isRemovedInspectorField(label)) return false;
         const std::initializer_list<std::pair<const char*, wxWindow*>> fields{
             {"Active2", linkActive2_}, {"ParamStrA", linkParamStrA_}, {"ParamStrB", linkParamStrB_},
             {"Logic", linkLogic_}, {"Not", linkNot1_}, {"Not2", linkNot2_}, {"DisplayInactive", linkDisplayInactive_}
@@ -5312,8 +5347,8 @@ private:
         for (const auto& field : fields) if (label == field.first) return field.second->IsShown();
         for (int i = 1; i <= 5; ++i) {
             const std::string base = "Param" + std::to_string(i);
-            if (label == base) return linkParamFields_->IsShown() && linkParamFields_->CompactColumnShown(0);
-            if (label == base + "b") return linkParamFields_->IsShown() && linkParamFields_->CompactColumnShown(1);
+            if (label == base) return linkParamFields_->IsShown() && linkParamFields_->ColumnShown(0);
+            if (label == base + "b") return linkParamFields_->IsShown() && linkParamFields_->ColumnShown(1);
         }
         return true;
     }
@@ -5322,8 +5357,10 @@ private:
         const bool jade = flavor == DlgFlavor::JadeEmpire;
         const bool jadeEntry = jade && kind == DlgNodeKind::Entry;
         linkDisplayInactive_->Hide();
-        actionParamFields_->SetCompactColumns(true, true);
-        linkParamFields_->SetCompactColumns(true, true);
+        if (jade) {
+            actionParamFields_->SetVisibleColumns(false, false);
+            linkParamFields_->SetVisibleColumns(false, false);
+        }
 
         const auto showPair = [](wxWindow* label, wxWindow* control, bool show) {
             if (label) label->Show(show);
@@ -5417,7 +5454,10 @@ private:
         setInspectorSectionTitle(1, jadeEntry ? "Scripts / Camera" : (jade ? "Reply Script" : "Scripts / Quest"));
         setInspectorSectionTitle(2, jade ? "Jade Presentation" : "Presentation");
         setInspectorSectionTitle(4, jadeEntry ? "Entry Animations" : (jade ? "Reply Animation" : "Animations"));
-        applySinglePanelContextVisibility();
+        applyInspectorContextVisibility();
+        // Remove entire hidden rows, including unit sizers and their gaps.
+        // This does not recreate controls or apply pending values.
+        if (!singlePanelActive_) rebuildInspectorForms(false);
         refreshInspectorLayouts();
     }
 
@@ -5538,10 +5578,11 @@ private:
     std::vector<CompactInspectorBand> compactInspectorBands_;
     std::vector<wxSizerItem*> compactInspectorRows_;
     bool singlePanelActive_ = false;
-    wxCheckBox* singlePanelOptional_ = nullptr;
-    DlgFlavor singlePanelFlavor_ = DlgFlavor::Kotor;
+    wxCheckBox* optionalFields_ = nullptr;
+    wxCheckBox* rawOptional_ = nullptr;
+    DlgFlavor inspectorFlavor_ = DlgFlavor::Kotor;
     bool contextRefreshPending_ = false;
-    bool singlePanelFadeTypeEdited_ = false;
+    bool inspectorFadeTypeEdited_ = false;
     bool inspectorLayoutRefreshPending_ = false;
     bool inspectorLayoutRefreshInProgress_ = false;
     wxSize inspectorClientSize_;

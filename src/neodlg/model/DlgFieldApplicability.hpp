@@ -34,7 +34,7 @@ inline bool isK2LinkInspectorField(std::string_view label) {
     return false;
 }
 
-inline bool isRemovedSinglePanelField(std::string_view label) {
+inline bool isRemovedInspectorField(std::string_view label) {
     // GFF3 labels are at most 16 bytes. Preserve the longer user-facing spelling
     // too; neither spelling is deleted or normalized by this display policy.
     for (const auto name : {"LinkComment", "IsChild", "PostProcNode", "RecordVO",
@@ -69,7 +69,7 @@ inline bool hasK2NodeInspectorFields(const GffStruct* node) {
     return false;
 }
 
-inline DlgFlavor singlePanelFieldFlavor(const DlgDocument& document) {
+inline DlgFlavor inspectorFieldFlavor(const DlgDocument& document) {
     if (document.dialect() == DlgDialect::JadeEmpire) return DlgFlavor::JadeEmpire;
     if (document.flavor() == DlgFlavor::Kotor2) return DlgFlavor::Kotor2;
     const auto linkListHasK2 = [](const GffStruct* owner, const char* label) {
@@ -103,7 +103,7 @@ struct DlgParameterVisibility {
     bool second = false;
 };
 
-inline DlgParameterVisibility singlePanelParameterVisibility(
+inline DlgParameterVisibility inspectorParameterVisibility(
     bool k2Controls, bool showOptional, bool firstScript, bool secondScript,
     std::array<bool, 2> retainedOrPending) {
     // A first script is valid in K1 and does not imply parameter support. A
@@ -113,7 +113,7 @@ inline DlgParameterVisibility singlePanelParameterVisibility(
             (k2Controls && showOptional) || secondScript || retainedOrPending[1]};
 }
 
-inline bool singlePanelReplyChoiceLink(const DlgDocument& document,
+inline bool inspectorReplyChoiceLink(const DlgDocument& document,
                                       std::optional<DlgNodeRef> node,
                                       std::optional<DlgLinkRef> link) {
     if (document.dialect() != DlgDialect::Kotor || !node || !link ||
@@ -121,6 +121,22 @@ inline bool singlePanelReplyChoiceLink(const DlgDocument& document,
         !document.node(*node) || !document.link(*link)) return false;
     const auto target = document.targetOf(*link);
     return target && *target == *node;
+}
+
+// Compatibility with the first, Single Panel-only release of this policy.
+inline bool isRemovedSinglePanelField(std::string_view label) {
+    return isRemovedInspectorField(label);
+}
+inline DlgFlavor singlePanelFieldFlavor(const DlgDocument& document) {
+    return inspectorFieldFlavor(document);
+}
+inline DlgParameterVisibility singlePanelParameterVisibility(
+    bool k2, bool optional, bool first, bool second, std::array<bool, 2> retained) {
+    return inspectorParameterVisibility(k2, optional, first, second, retained);
+}
+inline bool singlePanelReplyChoiceLink(const DlgDocument& document,
+    std::optional<DlgNodeRef> node, std::optional<DlgLinkRef> link) {
+    return inspectorReplyChoiceLink(document, node, link);
 }
 
 } // namespace neodlg
