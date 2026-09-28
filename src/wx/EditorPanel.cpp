@@ -1907,15 +1907,6 @@ private:
         });
         singleInspectorSizer_ = new wxBoxSizer(wxVERTICAL);
         singleInspector_->SetSizer(singleInspectorSizer_);
-        optionalFields_ = new wxCheckBox(inspectorHost_, wxID_ANY, "Show optional fields");
-        optionalFields_->SetName("NeoDLG optional fields");
-        optionalFields_->SetToolTip(
-            "Reveal unused parameter groups and preserved/uncertain fields in all dialogue views. "
-            "Does not restore removed authoring controls or modify the document.");
-        inspectorHostSizer->Add(optionalFields_, 0, wxALL, FromDIP(4));
-        optionalFields_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-            setShowOptionalFields(optionalFields_->GetValue());
-        });
         singleInspector_->Hide();
         inspectorHostSizer->Add(inspectorBook_, 1, wxEXPAND);
         inspectorHostSizer->Add(singleInspector_, 1, wxEXPAND);
@@ -3193,14 +3184,6 @@ private:
         rawFilter_ = new wxTextCtrl(page, wxID_ANY);
         rawFilter_->SetName("NeoDLG GFF filter");
         filterRow->Add(rawFilter_, 1);
-        rawOptional_ = new wxCheckBox(page, wxID_ANY, "Show optional fields");
-        rawOptional_->SetName("NeoDLG GFF optional fields");
-        rawOptional_->SetValue(optionalFields_ && optionalFields_->GetValue());
-        rawOptional_->SetToolTip("Reveal context-hidden fields, but not removed authoring fields. No stored data is deleted.");
-        filterRow->Add(rawOptional_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(8));
-        rawOptional_->Bind(wxEVT_CHECKBOX, [this](wxCommandEvent&) {
-            setShowOptionalFields(rawOptional_->GetValue());
-        });
         root->Add(filterRow, 0, wxEXPAND | wxBOTTOM, 6);
 
         rawTree_ = new wxTreeCtrl(page, ID_RawTree, wxDefaultPosition, wxDefaultSize,
@@ -4117,7 +4100,7 @@ private:
                                          wxString::Format("%d", cameraId), true);
                 } else if (nodeCameraId_->IsShown() && nodeCameraId_->IsModified()) {
                     // An inactive camera ID is preserved in either layout.
-                    // The optional override permits an intentional edit only.
+                    // Only write a visible field that was explicitly edited.
                     setOptionalNodeField(document, ref, "CameraID", FIELD_TYPE_INT,
                                          nodeCameraId_->GetValue(), false);
                 }
@@ -5366,7 +5349,7 @@ private:
         const std::string filter = lowerAscii(activeDocument().rawFilterTerm);
         if (model().loaded()) {
             const auto document = dialogue();
-            const DlgTreeFieldVisibility visibility(document, showOptionalFields());
+            const DlgTreeFieldVisibility visibility(document);
             for (const auto& row : model().rows()) {
                 // Filter the display projection only. Keep original GFF paths,
                 // list indices and model data; never renumber or delete fields.
@@ -5437,7 +5420,7 @@ private:
 
         const GffFieldRow row = rawRows_[static_cast<std::size_t>(data->rowIndex())];
         const auto document = dialogue();
-        if (!DlgTreeFieldVisibility(document, showOptionalFields()).visible(row.path)) return;
+        if (!DlgTreeFieldVisibility(document).visible(row.path)) return;
         if (!row.editable) {
             if (rawTree_->ItemHasChildren(item)) {
                 if (rawTree_->IsExpanded(item)) rawTree_->Collapse(item);
@@ -5449,17 +5432,6 @@ private:
         const auto value = wxui::promptText(this, "Edit GFF Value", row.label + " (" + row.type + "):", row.value);
         if (!value) return;
         mutate("Edit GFF value", [this, row, value]() { model().setValue(row.path, *value); });
-    }
-
-    bool showOptionalFields() const {
-        return optionalFields_ && optionalFields_->GetValue();
-    }
-
-    void setShowOptionalFields(bool show) {
-        if (optionalFields_) optionalFields_->SetValue(show);
-        if (rawOptional_) rawOptional_->SetValue(show);
-        refreshContextualInspector();
-        if (hasActiveDocument()) refreshRawTree();
     }
 
     void queueContextualInspectorRefresh() {
@@ -5513,12 +5485,11 @@ private:
         const auto document = dialogue();
         const auto ref = *activeDocument().selectedNode;
         const bool jade = document.dialect() == DlgDialect::JadeEmpire;
-        const bool optional = showOptionalFields();
         // No synthetic K1/K2 restriction is applied to Jade's own schema.
-        const bool k2 = !jade && (inspectorFlavor_ == DlgFlavor::Kotor2 || optional);
+        const bool k2 = !jade && inspectorFlavor_ == DlgFlavor::Kotor2;
         if (!jade) {
             pair(nodeScript2Label_, nodeScript2_, k2 || hasText(nodeScript2_));
-            const auto parameters = inspectorParameterVisibility(k2, optional,
+            const auto parameters = inspectorParameterVisibility(k2, false,
                 hasText(nodeScript1_), hasText(nodeScript2_),
                 {hasText(nodeActionStrA_) || actionParamFields_->HasPendingOrNonzeroValue(0),
                  hasText(nodeActionStrB_) || actionParamFields_->HasPendingOrNonzeroValue(1)});
@@ -5527,11 +5498,11 @@ private:
             pair(nodeActionStrBLabel_, nodeActionStrB_, second);
             actionParamFields_->SetVisibleColumns(first, second);
             windows({actionParamHeading_, actionParamFields_}, first || second);
-            pair(nodeQuestEntryLabel_, nodeQuestEntry_, optional || hasText(nodeQuest_) || hasText(nodeQuestEntry_));
+            pair(nodeQuestEntryLabel_, nodeQuestEntry_, hasText(nodeQuest_) || hasText(nodeQuestEntry_));
             // Sound is verified in K1. Preserve populated/edited K2 legacy data;
-            // reveal otherwise-unused legacy fields only through the override.
+            // otherwise hide the unused legacy field.
             pair(nodeSoundLabel_, nodeSound_, inspectorFlavor_ != DlgFlavor::Kotor2 ||
-                                             optional || hasText(nodeSound_));
+                                             hasText(nodeSound_));
             pair(nodeEmotionLabel_, nodeEmotion_, k2 || hasText(nodeEmotion_));
             pair(nodeFacialAnimLabel_, nodeFacialAnim_, k2 || hasText(nodeFacialAnim_));
             pair(nodeAlienRaceLabel_, nodeAlienRace_, k2 || hasText(nodeAlienRace_));
@@ -5539,16 +5510,16 @@ private:
 
             const std::string camera = selectedIntegerChoice(
                 nodeCameraAngle_, nodeCameraAngleValues_, "camera angle");
-            pair(nodeCameraIdLabel_, nodeCameraId_, camera == "6" || optional);
+            pair(nodeCameraIdLabel_, nodeCameraId_, camera == "6");
             windows({nodeCameraFov_, nodeCameraFovUnit_},
-                    nodeCameraFovMode_->GetSelection() == 1 || optional);
+                    nodeCameraFovMode_->GetSelection() == 1);
             const std::string fade = selectedIntegerChoice(
                 nodeFadeType_, nodeFadeTypeValues_, "fade type");
             // FadeType 0 means Fade OUT, not "disabled". Keep either direction's
             // authored detail fields visible; collapse only unconfigured rows.
             const bool authoredFade = document.hasNodeField(ref, "FadeColor") ||
                 document.hasNodeField(ref, "FadeDelay") || document.hasNodeField(ref, "FadeLength");
-            const bool fadeDetails = optional || authoredFade || fade != "0" ||
+            const bool fadeDetails = authoredFade || fade != "0" ||
                 inspectorFadeTypeEdited_ || fadeColorEdited_ ||
                 nodeFadeDelay_->IsModified() || nodeFadeLength_->IsModified();
             windows({nodeFadeColorLabel_, nodeFadeColorPicker_, nodeFadeColorRLabel_, nodeFadeColorR_,
@@ -5577,7 +5548,7 @@ private:
             pair(linkLogicLabel_, linkLogic_, k2 || hasText(linkLogic_));
             pair(linkNot1Placeholder_, linkNot1_, k2 || linkNot1_->GetValue());
             pair(linkNot2Placeholder_, linkNot2_, k2 || linkNot2_->GetValue());
-            const auto parameters = inspectorParameterVisibility(k2, optional,
+            const auto parameters = inspectorParameterVisibility(k2, false,
                 hasText(linkActive1_), hasText(linkActive2_),
                 {hasText(linkParamStrA_) || linkParamFields_->HasPendingOrNonzeroValue(0),
                  hasText(linkParamStrB_) || linkParamFields_->HasPendingOrNonzeroValue(1)});
@@ -5843,8 +5814,6 @@ private:
     std::vector<CompactInspectorBand> compactInspectorBands_;
     std::vector<wxSizerItem*> compactInspectorRows_;
     bool singlePanelActive_ = false;
-    wxCheckBox* optionalFields_ = nullptr;
-    wxCheckBox* rawOptional_ = nullptr;
     DlgFlavor inspectorFlavor_ = DlgFlavor::Kotor;
     bool contextRefreshPending_ = false;
     bool inspectorFadeTypeEdited_ = false;
