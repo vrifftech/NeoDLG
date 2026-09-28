@@ -12,10 +12,11 @@ namespace neodlg {
 
 // A read-only projection policy for NeoDLG's GFF tree, NOT a schema validator.
 // Paths and list indices stay untouched. Unknown fields/structures stay visible;
-// Show optional fields exposes context-hidden data, never retired controls.
+// Optional fields are visible by default, even when empty or inactive. This
+// does not bypass game/dialect or link-direction rules, or restore deleted fields.
 class DlgTreeFieldVisibility {
 public:
-    explicit DlgTreeFieldVisibility(const DlgDocument& document, bool showOptional = false)
+    explicit DlgTreeFieldVisibility(const DlgDocument& document, bool showOptional = true)
         : document_(document), flavor_(inspectorFieldFlavor(document)), optional_(showOptional) {}
 
     bool visible(std::string_view path) const {
@@ -30,7 +31,7 @@ public:
         // field must not reappear at the root when search removes their parent.
         for (const auto part : parts)
             if (isRemovedInspectorField(fieldLabel(part))) return false;
-        if (optional_ || !document_.semanticallyEditable() || parts.size() < 3) return true;
+        if (!document_.semanticallyEditable() || parts.size() < 3) return true;
 
         const auto index = parseIndex(parts[1]);
         if (!index) return true; // Preserve unfamiliar/duplicate container paths.
@@ -111,7 +112,7 @@ private:
                 retained[static_cast<std::size_t>(column)] |= !value.empty() && value != "0";
             }
         }
-        return inspectorParameterVisibility(flavor_ == DlgFlavor::Kotor2, false,
+        return inspectorParameterVisibility(flavor_ == DlgFlavor::Kotor2, optional_,
             !text(owner, action ? "Script" : "Active").empty(),
             !text(owner, action ? "Script2" : "Active2").empty(), retained);
     }
@@ -138,10 +139,10 @@ private:
             const auto shown = parameters(node, true);
             return bank == 0 ? shown.first : shown.second;
         }
-        if (label == "CameraID") return text(node, "CameraAngle") == "6";
-        if (label == "CamFieldOfView") return text(node, "CamFieldOfView") != "-1";
-        if (label == "QuestEntry") return !text(node, "Quest").empty() || !text(node, label).empty();
-        if (label == "Sound" && flavor_ == DlgFlavor::Kotor2) return !text(node, label).empty();
+        if (label == "CameraID") return optional_ || text(node, "CameraAngle") == "6";
+        if (label == "CamFieldOfView") return optional_ || text(node, "CamFieldOfView") != "-1";
+        if (label == "QuestEntry") return optional_ || !text(node, "Quest").empty() || !text(node, label).empty();
+        if (label == "Sound" && flavor_ == DlgFlavor::Kotor2) return optional_ || !text(node, label).empty();
         // Presence of any K2 marker anywhere was considered in flavor_. Do not
         // infer Entry-only status for the common action/quest/camera/fade fields.
         if (isK2NodeInspectorField(label))

@@ -5454,8 +5454,9 @@ private:
     }
 
     void applyInspectorContextVisibility() {
-        // Applicability is shared by both semantic presentations. Compact
-        // sizing/reparenting remains exclusively a Single Panel concern.
+        // Show applicable optional fields even when no value/script is assigned.
+        // Game/dialect and incoming-link applicability still apply in both views;
+        // compact sizing/reparenting remains exclusively a Single Panel concern.
         for (auto& section : inspectorSections_) section.singleHost->Show(true);
         if (auto* button = FindWindow(ID_ApplyLink)) button->Show(true);
         const auto pair = [this](wxWindow* label, wxWindow* field, bool show) {
@@ -5489,7 +5490,7 @@ private:
         const bool k2 = !jade && inspectorFlavor_ == DlgFlavor::Kotor2;
         if (!jade) {
             pair(nodeScript2Label_, nodeScript2_, k2 || hasText(nodeScript2_));
-            const auto parameters = inspectorParameterVisibility(k2, false,
+            const auto parameters = inspectorParameterVisibility(k2, true,
                 hasText(nodeScript1_), hasText(nodeScript2_),
                 {hasText(nodeActionStrA_) || actionParamFields_->HasPendingOrNonzeroValue(0),
                  hasText(nodeActionStrB_) || actionParamFields_->HasPendingOrNonzeroValue(1)});
@@ -5498,34 +5499,22 @@ private:
             pair(nodeActionStrBLabel_, nodeActionStrB_, second);
             actionParamFields_->SetVisibleColumns(first, second);
             windows({actionParamHeading_, actionParamFields_}, first || second);
-            pair(nodeQuestEntryLabel_, nodeQuestEntry_, hasText(nodeQuest_) || hasText(nodeQuestEntry_));
-            // Sound is verified in K1. Preserve populated/edited K2 legacy data;
-            // otherwise hide the unused legacy field.
-            pair(nodeSoundLabel_, nodeSound_, inspectorFlavor_ != DlgFlavor::Kotor2 ||
-                                             hasText(nodeSound_));
+            pair(nodeQuestEntryLabel_, nodeQuestEntry_, true);
+            // Keep the optional/legacy sound slot accessible without a toggle.
+            pair(nodeSoundLabel_, nodeSound_, true);
             pair(nodeEmotionLabel_, nodeEmotion_, k2 || hasText(nodeEmotion_));
             pair(nodeFacialAnimLabel_, nodeFacialAnim_, k2 || hasText(nodeFacialAnim_));
             pair(nodeAlienRaceLabel_, nodeAlienRace_, k2 || hasText(nodeAlienRace_));
             pair(nodeUnskippablePlaceholder_, nodeUnskippable_, k2 || nodeUnskippable_->GetValue());
 
-            const std::string camera = selectedIntegerChoice(
-                nodeCameraAngle_, nodeCameraAngleValues_, "camera angle");
-            pair(nodeCameraIdLabel_, nodeCameraId_, camera == "6");
-            windows({nodeCameraFov_, nodeCameraFovUnit_},
-                    nodeCameraFovMode_->GetSelection() == 1);
-            const std::string fade = selectedIntegerChoice(
-                nodeFadeType_, nodeFadeTypeValues_, "fade type");
-            // FadeType 0 means Fade OUT, not "disabled". Keep either direction's
-            // authored detail fields visible; collapse only unconfigured rows.
-            const bool authoredFade = document.hasNodeField(ref, "FadeColor") ||
-                document.hasNodeField(ref, "FadeDelay") || document.hasNodeField(ref, "FadeLength");
-            const bool fadeDetails = authoredFade || fade != "0" ||
-                inspectorFadeTypeEdited_ || fadeColorEdited_ ||
-                nodeFadeDelay_->IsModified() || nodeFadeLength_->IsModified();
+            // Optional fields stay visible; updateCameraControls() still disables
+            // inactive camera inputs without clearing or writing their values.
+            pair(nodeCameraIdLabel_, nodeCameraId_, true);
+            windows({nodeCameraFov_, nodeCameraFovUnit_}, true);
             windows({nodeFadeColorLabel_, nodeFadeColorPicker_, nodeFadeColorRLabel_, nodeFadeColorR_,
                      nodeFadeColorGLabel_, nodeFadeColorG_, nodeFadeColorBLabel_, nodeFadeColorB_,
                      nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_,
-                     nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}, fadeDetails);
+                     nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_}, true);
         } else {
             // The existing Jade Entry/Reply rules are unchanged. Don't reserve
             // an entire unified section solely for the not-applicable note.
@@ -5548,7 +5537,7 @@ private:
             pair(linkLogicLabel_, linkLogic_, k2 || hasText(linkLogic_));
             pair(linkNot1Placeholder_, linkNot1_, k2 || linkNot1_->GetValue());
             pair(linkNot2Placeholder_, linkNot2_, k2 || linkNot2_->GetValue());
-            const auto parameters = inspectorParameterVisibility(k2, false,
+            const auto parameters = inspectorParameterVisibility(k2, true,
                 hasText(linkActive1_), hasText(linkActive2_),
                 {hasText(linkParamStrA_) || linkParamFields_->HasPendingOrNonzeroValue(0),
                  hasText(linkParamStrB_) || linkParamFields_->HasPendingOrNonzeroValue(1)});
