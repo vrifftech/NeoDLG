@@ -763,6 +763,28 @@ std::string lowerAsciiValue(std::string text) {
     return text;
 }
 
+// Node Delay is an unsigned DWORD. Only UINT32_MAX is the automatic-timing
+// sentinel; other values (including zero) must not be reinterpreted as signed.
+// Keep the raw GFF/model representation unchanged and translate at the UI edge.
+std::string nodeDelayForDisplay(const std::string& stored) {
+    return stored == "4294967295" ? "Auto" : stored;
+}
+
+std::optional<std::string> nodeDelayForStorage(const std::string& input, bool fieldExists) {
+    const std::string text = trimAscii(input);
+    if (text.empty() && !fieldExists) return std::nullopt;
+    const std::string keyword = lowerAsciiValue(text);
+    if (text.empty() || keyword == "auto" || keyword == "default" || text == "-1")
+        return std::string("4294967295");
+    try {
+        return std::to_string(neogff::ParseUInt32Decimal(text));
+    } catch (const std::exception&) {
+        throw std::invalid_argument(
+            "Delay must be Auto (or -1), or whole seconds from 0 to 4294967294. "
+            "The raw value 4294967295 also means Auto.");
+    }
+}
+
 std::int32_t indexedComboValue(const wxComboBox* control, const std::string& fieldName) {
     if (!control) throw std::runtime_error(fieldName + " control is unavailable.");
     std::string text = trimAscii(wxui::toStd(control->GetValue()));
@@ -2780,7 +2802,12 @@ private:
         form->AddGrowableCol(1, 1);
 
         nodeSound_ = addTextField(page, form, "Sound resref:", 0, wxDefaultSize, &nodeSoundLabel_);
-        nodeDelay_ = addTextField(page, form, "Delay:", 0, wxDefaultSize, &nodeDelayLabel_);
+        nodeDelay_ = addTextField(page, form, "Delay (s):", 0, wxDefaultSize, &nodeDelayLabel_);
+        nodeDelay_->SetToolTip(
+            "Auto (or -1) uses the game's default timing, stored as DWORD 4294967295. "
+            "Otherwise enter a nonnegative whole number of seconds. Zero is an explicit "
+            "delay, not Auto. Clearing an existing value resets it to Auto; an absent "
+            "field stays absent until a value is entered.");
         nodeWaitFlags_ = addTextField(page, form, "Wait flags:", 0, wxDefaultSize, &nodeWaitFlagsLabel_);
 
         nodeCameraAngleLabel_ = new wxStaticText(page, wxID_ANY, "Camera angle:");
@@ -4084,7 +4111,10 @@ private:
             if (jade) return;
 
             setOptionalNodeField(document, ref, "Sound", FIELD_TYPE_RESREF, nodeSound_->GetValue(), false);
-            setOptionalNodeField(document, ref, "Delay", FIELD_TYPE_DWORD, nodeDelay_->GetValue(), false);
+            if (const auto delay = nodeDelayForStorage(wxui::toStd(nodeDelay_->GetValue()),
+                                                       document.hasNodeField(ref, "Delay"))) {
+                setOptionalNodeField(document, ref, "Delay", FIELD_TYPE_DWORD, wxui::toWx(*delay), false);
+            }
             setOptionalNodeField(document, ref, "WaitFlags", FIELD_TYPE_DWORD, nodeWaitFlags_->GetValue(), false);
 
             if (!jade) {
@@ -4939,7 +4969,7 @@ private:
             }
 
             loadField(nodeSound_, document.nodeField(ref, "Sound"));
-            loadField(nodeDelay_, document.nodeField(ref, "Delay"));
+            loadField(nodeDelay_, nodeDelayForDisplay(document.nodeField(ref, "Delay")));
             loadField(nodeWaitFlags_, document.nodeField(ref, "WaitFlags"));
             populateIntegerChoice(nodeCameraAngle_, nodeCameraAngleValues_, kCameraAngleOptions,
                                   document.nodeField(ref, "CameraAngle"), 0,
