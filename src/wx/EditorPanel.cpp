@@ -214,7 +214,7 @@ public:
         for (std::size_t column = 0; column < titles.size(); ++column) {
             compactTitles_[column] = new wxStaticText(this, wxID_ANY, titles[column]);
             form->Add(compactTitles_[column], 0, wxALIGN_CENTER_VERTICAL);
-            auto* strip = new wxFlexGridSizer(2, FromDIP(3), FromDIP(6));
+            auto* strip = new wxFlexGridSizer(2, FromDIP(3), FromDIP(4));
             compactRows_[column] = strip;
             for (std::size_t row = 0; row < cells_.size(); ++row) {
                 auto* label = new wxStaticText(this, wxID_ANY,
@@ -342,9 +342,14 @@ public:
     void RefreshFieldMetrics() {
         for (const auto& row : cells_) {
             for (auto* field : row) {
-                // Fit a signed 32-bit value; never clamp or truncate its text.
-                const int width = field->GetTextExtent("-2147483648").x + FromDIP(20);
-                field->SetMinSize(wxSize(std::max(FromDIP(100), width), -1));
+                // This is a text viewport, not the numeric range. Keep four
+                // digits visible in Single Panel; longer/signed values scroll
+                // inside the same control without reflowing the inspector.
+                const int width = singlePanel_
+                    ? field->GetTextExtent("0000").x + field->FromDIP(16)
+                    : std::max(FromDIP(100), field->GetTextExtent("-2147483648").x + FromDIP(20));
+                field->SetMinSize(wxSize(width, -1));
+                field->SetMaxSize(singlePanel_ ? wxSize(width, -1) : wxDefaultSize);
                 field->InvalidateBestSize();
             }
         }
@@ -369,7 +374,7 @@ private:
                 widths.push_back({compactLabels_[row][column]->GetEffectiveMinSize().x,
                                   cells_[row][column]->GetEffectiveMinSize().x});
             }
-            const int columns = inspectorFieldColumns(widths, width, FromDIP(6), 5);
+            const int columns = inspectorFieldColumns(widths, width, FromDIP(4), 5);
             compactRows_[column]->SetCols(2 * columns);
         }
         InvalidateBestSize();
@@ -2091,30 +2096,32 @@ private:
             if (label) field->SetName("NeoDLG " + label->GetLabel());
             inspectorFieldMetrics_.push_back({field, sample, legacyMin});
         };
-        // Widths reflect storage types, not an artificial input limit. In
-        // particular a DWORD/INT must still display its full decimal range.
-        scalar(nodeStrRef_, nodeStrRefLabel_, "4294967295");
-        scalar(nodeStringType_, nodeStringTypeLabel_, "4294967295");
-        scalar(nodeQuestEntry_, nodeQuestEntryLabel_, "4294967295");
-        scalar(nodePlotIndex_, nodePlotIndexLabel_, "-2147483648");
-        scalar(nodePlotXp_, nodePlotXpLabel_, "-100.0000");
-        scalar(nodeDelay_, nodeDelayLabel_, "4294967295");
-        scalar(nodeWaitFlags_, nodeWaitFlagsLabel_, "4294967295");
-        scalar(nodeCameraId_, nodeCameraIdLabel_, "-2147483648");
-        scalar(nodeCamHeightOffset_, nodeCamHeightOffsetLabel_, "-100.0000");
-        scalar(nodeTarHeightOffset_, nodeTarHeightOffsetLabel_, "-100.0000");
-        scalar(nodeCameraFov_, nodeCameraFovLabel_, "180.0000", FromDIP(wxSize(110, -1)));
-        scalar(nodeCameraAnimation_, nodeCameraAnimationLabel_, "65535");
-        scalar(nodeEmotion_, nodeEmotionLabel_, "-2147483648");
-        scalar(nodeFacialAnim_, nodeFacialAnimLabel_, "-2147483648");
-        scalar(nodeFadeColorR_, nullptr, "0.0000", FromDIP(wxSize(72, -1)));
-        scalar(nodeFadeColorG_, nullptr, "0.0000", FromDIP(wxSize(72, -1)));
-        scalar(nodeFadeColorB_, nullptr, "0.0000", FromDIP(wxSize(72, -1)));
-        scalar(nodeFadeDelay_, nodeFadeDelayLabel_, "1000.0000");
-        scalar(nodeFadeLength_, nodeFadeLengthLabel_, "1000.0000");
-        scalar(nodeAlienRace_, nodeAlienRaceLabel_, "-2147483648");
-        scalar(linkLogic_, linkLogicLabel_, "-2147483648");
-        scalar(linkDesignerNumber_, linkDesignerNumberLabel_, "-2147483648");
+        // Single Panel budgets visible characters, not the entire storage
+        // range. These remain unrestricted text controls: long values scroll,
+        // and parsing/validation still uses the full text. Conversation restores
+        // its original minimums in refreshCompactInspectorMetrics().
+        scalar(nodeStrRef_, nodeStrRefLabel_, "0000000");
+        scalar(nodeStringType_, nodeStringTypeLabel_, "00");
+        scalar(nodeQuestEntry_, nodeQuestEntryLabel_, "0000");
+        scalar(nodePlotIndex_, nodePlotIndexLabel_, "-0000");
+        scalar(nodePlotXp_, nodePlotXpLabel_, "100.0");
+        scalar(nodeDelay_, nodeDelayLabel_, "00000");
+        scalar(nodeWaitFlags_, nodeWaitFlagsLabel_, "000");
+        scalar(nodeCameraId_, nodeCameraIdLabel_, "-0000");
+        scalar(nodeCamHeightOffset_, nodeCamHeightOffsetLabel_, "-0.00");
+        scalar(nodeTarHeightOffset_, nodeTarHeightOffsetLabel_, "-0.00");
+        scalar(nodeCameraFov_, nodeCameraFovLabel_, "180.0", FromDIP(wxSize(110, -1)));
+        scalar(nodeCameraAnimation_, nodeCameraAnimationLabel_, "0000");
+        scalar(nodeEmotion_, nodeEmotionLabel_, "000");
+        scalar(nodeFacialAnim_, nodeFacialAnimLabel_, "000");
+        scalar(nodeFadeColorR_, nullptr, "0.00", FromDIP(wxSize(72, -1)));
+        scalar(nodeFadeColorG_, nullptr, "0.00", FromDIP(wxSize(72, -1)));
+        scalar(nodeFadeColorB_, nullptr, "0.00", FromDIP(wxSize(72, -1)));
+        scalar(nodeFadeDelay_, nodeFadeDelayLabel_, "0.000");
+        scalar(nodeFadeLength_, nodeFadeLengthLabel_, "0.000");
+        scalar(nodeAlienRace_, nodeAlienRaceLabel_, "000");
+        scalar(linkLogic_, linkLogicLabel_, "00");
+        scalar(linkDesignerNumber_, linkDesignerNumberLabel_, "-0000");
 
         // These are only display widths: free-form tags/strings are not given
         // a maximum input length. Restore their original minimums in Conversation.
@@ -2411,8 +2418,19 @@ private:
                     root->Add(linkDisplayInactive_, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad);
                 parameters(root, linkParamHeading_, linkParamFields_);
                 apply(root, page, ID_ApplyLink);
+            } else if (singlePanel) {
+                // One small action/status row; never stretch the last button.
+                auto* actions = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
+                actions->Add(animationSummary_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT,
+                             FromDIP(6));
+                for (auto* button : {animationAddButton_, animationEditButton_, animationDeleteButton_})
+                    actions->Add(button, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(3));
+                root->Add(actions, 0, wxEXPAND | wxALL, pad);
+                // The list is sized to its columns and at most three rows, not
+                // the section width or the old fixed 220-DIP empty canvas.
+                root->Add(animationList_, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad);
             } else {
-                root->Add(animationList_, singlePanel ? 0 : 1, wxEXPAND | wxALL, pad);
+                root->Add(animationList_, 1, wxEXPAND | wxALL, pad);
                 auto* buttons = new wxBoxSizer(wxHORIZONTAL);
                 buttons->Add(animationAddButton_, 0, wxRIGHT, 4);
                 buttons->Add(animationEditButton_, 0, wxRIGHT, 4);
@@ -2538,6 +2556,7 @@ private:
             // FitInside may add/remove the vertical scrollbar on the first
             // pass. Pack once more against that final visible width.
             if (pass != 0) refreshCompactInspectorBands();
+            refreshAnimationPresentation();
             for (auto& section : inspectorSections_) {
                 if (section.content) {
                     section.content->InvalidateBestSize();
@@ -3029,8 +3048,12 @@ private:
     void buildAnimationsPage(wxNotebook* book) {
         wxBoxSizer* root = nullptr;
         wxPanel* page = makeInspectorSection(book, "Animations", root);
+        animationSummary_ = new wxStaticText(page, wxID_ANY, "No animations");
+        animationSummary_->SetName("NeoDLG animation summary");
+        animationSummary_->Hide();
         animationList_ = new wxListCtrl(page, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                         wxLC_REPORT | wxLC_SINGLE_SEL);
+        animationList_->SetName("NeoDLG animation list");
         animationList_->InsertColumn(0, "Participant");
         animationList_->InsertColumn(1, "Animation ID");
         animationList_->InsertColumn(2, "Emotion ID");
@@ -3047,6 +3070,22 @@ private:
         buttons->Add(animationEditButton_, 0, wxRIGHT, 4);
         buttons->Add(animationDeleteButton_, 0);
         root->Add(buttons, 0, wxLEFT | wxRIGHT | wxBOTTOM, 10);
+
+        const auto selectionChanged = [this](wxListEvent& event) {
+            event.Skip();
+            if (singlePanelActive_) refreshCompactAnimationActions();
+        };
+        animationList_->Bind(wxEVT_LIST_ITEM_SELECTED, selectionChanged);
+        animationList_->Bind(wxEVT_LIST_ITEM_DESELECTED, selectionChanged);
+        animationList_->Bind(wxEVT_LIST_ITEM_ACTIVATED, [this](wxListEvent& event) {
+            if (!singlePanelActive_) { event.Skip(); return; }
+            const long row = event.GetIndex();
+            if (row < 0 || static_cast<std::size_t>(row) >= animationValues_.size()) return;
+            animationList_->SetItemState(row, wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED,
+                                         wxLIST_STATE_SELECTED | wxLIST_STATE_FOCUSED);
+            wxCommandEvent edit(wxEVT_BUTTON, ID_AnimationEdit);
+            onAnimationEdit(edit);
+        });
 
         animationList_->Bind(wxEVT_LIST_ITEM_RIGHT_CLICK, [this](wxListEvent& event) {
             const long row = event.GetIndex();
@@ -5025,6 +5064,12 @@ private:
         animationList_->SetColumnWidth(0, jadeReply ? 0 : FromDIP(220));
         animationList_->SetColumnWidth(1, FromDIP(150));
         animationList_->SetColumnWidth(2, jade ? FromDIP(130) : 0);
+        // A document/dialect refresh resets the legacy widths just as before.
+        // Keep them separately while the same list is using compact columns.
+        if (animationCompact_) {
+            for (int column = 0; column < 3; ++column)
+                animationConversationWidths_[column] = animationList_->GetColumnWidth(column);
+        }
 
         for (std::size_t i = 0; i < animationValues_.size(); ++i) {
             const DlgAnimation& animation = animationValues_[i];
@@ -5044,6 +5089,143 @@ private:
         if (animationAddButton_) animationAddButton_->Enable(!jadeReply);
         if (animationEditButton_) animationEditButton_->Enable(hasSelection);
         if (animationDeleteButton_) animationDeleteButton_->Enable(!jadeReply && hasSelection);
+    }
+
+    void refreshCompactAnimationActions() {
+        if (!singlePanelActive_ || !animationList_) return;
+        const bool hasNode = hasActiveDocument() && model().loaded() &&
+            dialogue().semanticallyEditable() && activeDocument().selectedNode.has_value();
+        const bool jadeReply = hasNode && dialogue().dialect() == DlgDialect::JadeEmpire &&
+            activeDocument().selectedNode->kind == DlgNodeKind::Reply;
+        const long row = selectedAnimationRow();
+        const bool selected = hasNode && row >= 0 &&
+            static_cast<std::size_t>(row) < animationValues_.size();
+        animationAddButton_->Enable(hasNode && !jadeReply);
+        animationEditButton_->Enable(selected);
+        animationDeleteButton_->Enable(selected && !jadeReply);
+    }
+
+    void refreshAnimationPresentation() {
+        if (!animationList_ || !animationSummary_) return;
+        const bool hasNode = hasActiveDocument() && model().loaded() &&
+            dialogue().semanticallyEditable() && activeDocument().selectedNode.has_value();
+        const bool jade = hasNode && dialogue().dialect() == DlgDialect::JadeEmpire;
+        const bool jadeReply = jade && activeDocument().selectedNode->kind == DlgNodeKind::Reply;
+        const std::size_t count = animationValues_.size();
+        const auto heading = [this](int column, const wxString& text) {
+            wxListItem item;
+            item.SetMask(wxLIST_MASK_TEXT);
+            animationList_->GetColumn(column, item);
+            if (item.GetText() != text) {
+                item.SetMask(wxLIST_MASK_TEXT);
+                item.SetText(text);
+                animationList_->SetColumn(column, item);
+            }
+        };
+        const auto exactButtons = [this](bool compact) {
+            for (auto* button : {animationAddButton_, animationEditButton_, animationDeleteButton_}) {
+                const long style = button->GetWindowStyleFlag();
+                const long desired = compact ? style | wxBU_EXACTFIT : style & ~wxBU_EXACTFIT;
+                if (style != desired) {
+                    button->SetWindowStyleFlag(desired);
+                    button->InvalidateBestSize();
+                }
+            }
+        };
+        if (!singlePanelActive_) {
+            if (!animationCompact_) return;
+            // Restore Conversation's full-height list, original headers,
+            // column widths and action row without reloading any records.
+            animationCompact_ = false;
+            animationSummary_->Hide();
+            animationList_->Show();
+            animationList_->SetMinSize(FromDIP(wxSize(-1, 220)));
+            animationList_->SetMaxSize(wxDefaultSize);
+            animationList_->SetToolTip(wxString{});
+            heading(1, "Animation ID");
+            heading(2, "Emotion ID");
+            for (int column = 0; column < 3; ++column)
+                animationList_->SetColumnWidth(column, animationConversationWidths_[column]);
+            exactButtons(false);
+            for (auto* button : {animationAddButton_, animationEditButton_, animationDeleteButton_})
+                button->Show();
+            animationAddButton_->Enable(hasNode && !jadeReply);
+            animationEditButton_->Enable(hasNode && count != 0);
+            animationDeleteButton_->Enable(hasNode && !jadeReply && count != 0);
+            animationList_->InvalidateBestSize();
+            return;
+        }
+        if (!animationCompact_) {
+            for (int column = 0; column < 3; ++column)
+                animationConversationWidths_[column] = animationList_->GetColumnWidth(column);
+            animationCompact_ = true;
+        }
+        exactButtons(true);
+        const wxString summary = !hasNode ? wxString("Select a dialogue node") :
+            count == 0 ? wxString("No animations") :
+            count == 1 ? wxString("1 animation") : wxString::Format("%zu animations", count);
+        if (animationSummary_->GetLabel() != summary) animationSummary_->SetLabel(summary);
+        animationSummary_->Show();
+        animationAddButton_->Show(!jadeReply);
+        animationEditButton_->Show(count != 0);
+        animationDeleteButton_->Show(!jadeReply && count != 0);
+        animationList_->Show(count != 0);
+        refreshCompactAnimationActions();
+        if (count == 0) return; // No empty white list, header or reserved rows.
+
+        heading(1, "Anim ID");
+        heading(2, "Emotion");
+        animationList_->SetToolTip("Double-click a row or press Enter to edit. "
+                                   "Scroll the list for more animations.");
+        const int padding = FromDIP(14);
+        const auto textWidth = [this, padding](const wxString& text) {
+            return animationList_->GetTextExtent(text).x + padding;
+        };
+        int participant = textWidth("Participant");
+        int animation = textWidth("Anim ID");
+        int emotion = textWidth("Emotion");
+        // Numeric columns fit their actual values, not a fixed 130/150 DIP.
+        // Keep every digit of unusual IDs; cap only the participant viewport.
+        for (long row = 0; row < animationList_->GetItemCount(); ++row) {
+            participant = std::max(participant, textWidth(animationList_->GetItemText(row, 0)));
+            animation = std::max(animation, textWidth(animationList_->GetItemText(row, 1)));
+            emotion = std::max(emotion, textWidth(animationList_->GetItemText(row, 2)));
+        }
+        participant = jadeReply ? 0 : std::min(participant, textWidth("abcdefghijklmnopqrstuvwx"));
+        if (!jade) emotion = 0;
+        const int available = std::max(1, singleInspector_->GetClientSize().x - FromDIP(36));
+        const int verticalBar = count > 3 ? std::max(FromDIP(12),
+            wxSystemSettings::GetMetric(wxSYS_VSCROLL_X, animationList_)) : 0;
+        const wxSize border = animationList_->GetWindowBorderSize();
+        const int chrome = std::max(FromDIP(4), border.x) + verticalBar;
+        // Give the participant only its needed width, reducing it first when
+        // the inspector narrows. Native horizontal scrolling handles extremes.
+        if (!jadeReply) participant = std::max(textWidth("Participant"),
+            std::min(participant, available - animation - emotion - chrome));
+        const std::array<int, 3> widths{participant, animation, emotion};
+        for (int column = 0; column < 3; ++column)
+            if (animationList_->GetColumnWidth(column) != widths[column])
+                animationList_->SetColumnWidth(column, widths[column]);
+        const int contentWidth = participant + animation + emotion;
+        const int width = std::min(available, contentWidth + chrome);
+        int rowHeight = animationList_->GetCharHeight() + FromDIP(6);
+        int headerHeight = animationList_->GetCharHeight() + FromDIP(10);
+        wxRect itemRect;
+        const long top = animationList_->GetTopItem();
+        if (top >= 0 && animationList_->GetItemRect(top, itemRect, wxLIST_RECT_BOUNDS)) {
+            rowHeight = std::max(rowHeight, itemRect.height);
+            // The first visible item is relative to the native list client,
+            // unlike item zero which goes negative after scrolling.
+            if (itemRect.y >= 0) headerHeight = std::max(headerHeight, itemRect.y);
+        }
+        const int horizontalBar = contentWidth + chrome > width ? std::max(FromDIP(12),
+            wxSystemSettings::GetMetric(wxSYS_HSCROLL_Y, animationList_)) : 0;
+        const int height = headerHeight + static_cast<int>(std::min<std::size_t>(count, 3)) * rowHeight +
+            std::max(FromDIP(4), border.y) + horizontalBar;
+        const wxSize size(width, height);
+        if (animationList_->GetMinSize() != size) animationList_->SetMinSize(size);
+        if (animationList_->GetMaxSize() != size) animationList_->SetMaxSize(size);
+        animationList_->InvalidateBestSize();
     }
 
     void materializeRawTreeChildren(const wxTreeItemId& parentItem, const std::string& parentPath) {
@@ -5743,7 +5925,10 @@ private:
     wxStaticText* linkParamHeading_ = nullptr;
     IntegerParameterFields* linkParamFields_ = nullptr;
 
+    wxStaticText* animationSummary_ = nullptr;
     wxListCtrl* animationList_ = nullptr;
+    bool animationCompact_ = false;
+    std::array<int, 3> animationConversationWidths_{};
     wxButton* animationAddButton_ = nullptr;
     wxButton* animationEditButton_ = nullptr;
     wxButton* animationDeleteButton_ = nullptr;
