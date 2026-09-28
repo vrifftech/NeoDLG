@@ -148,28 +148,6 @@ std::string linkConditionSummary(const DlgDocument& document, DlgLinkRef ref) {
     return result;
 }
 
-// Each field occupies a label/value pair in a real grid row. Choose the largest
-// number of pairs whose column minima fit the *viewport*, not a wrapped sizer's
-// cached minimum width. Returning one pair permits narrow inspectors without
-// widening scalar controls or changing their input ranges.
-int inspectorFieldColumns(const std::vector<std::array<int, 2>>& widths,
-                          int availableWidth, int gap, int maximumColumns) {
-    const int limit = std::min(std::max(1, maximumColumns),
-                               static_cast<int>(widths.size()));
-    for (int columns = limit; columns > 1; --columns) {
-        std::vector<std::array<int, 2>> maxima(static_cast<std::size_t>(columns), {0, 0});
-        for (std::size_t i = 0; i < widths.size(); ++i) {
-            auto& slot = maxima[i % static_cast<std::size_t>(columns)];
-            slot[0] = std::max(slot[0], widths[i][0]);
-            slot[1] = std::max(slot[1], widths[i][1]);
-        }
-        int required = (2 * columns - 1) * gap;
-        for (const auto& slot : maxima) required += slot[0] + slot[1];
-        if (required <= availableWidth) return columns;
-    }
-    return 1;
-}
-
 // Pack complete label/value groups in reading order using their actual widths.
 // Unlike a column grid, a long label on one row does not pad every other row.
 // No two/three-field ceiling: short groups keep filling the current row. An
@@ -197,9 +175,9 @@ std::vector<int> inspectorFieldRows(const std::vector<int>& widths,
     return rows;
 }
 
-// Conversation keeps its original grid; Single Panel uses content-sized native
-// fields without an unused grid canvas. Switching copies only pending UI text,
-// never applies it to the document or changes numeric parsing/validation.
+// Conversation keeps its original grid. Single Panel borrows the existing
+// script/text controls into this panel so each slot can share one responsive
+// row with its five integers. No duplicate editable values or document writes.
 class IntegerParameterFields final : public wxPanel {
 public:
     IntegerParameterFields(wxWindow* parent,
@@ -207,32 +185,23 @@ public:
                            const wxString& secondColumn)
         : wxPanel(parent, wxID_ANY) {
         const std::array<wxString, 2> titles{firstColumn, secondColumn};
-        // One responsive strip per script/condition, rather than a header and
-        // five tall parameter rows. The grid presentation remains unchanged in
-        // Conversation. All ten controls keep their original row/column keys.
-        auto* form = new wxFlexGridSizer(2, FromDIP(3), FromDIP(8));
         for (std::size_t column = 0; column < titles.size(); ++column) {
             compactTitles_[column] = new wxStaticText(this, wxID_ANY, titles[column]);
-            form->Add(compactTitles_[column], 0, wxALIGN_CENTER_VERTICAL);
-            auto* strip = new wxFlexGridSizer(2, FromDIP(3), FromDIP(4));
-            compactRows_[column] = strip;
             for (std::size_t row = 0; row < cells_.size(); ++row) {
                 auto* label = new wxStaticText(this, wxID_ANY,
                     wxString::Format("%d:", static_cast<int>(row + 1)));
                 label->SetToolTip(titles[column] + wxString::Format(
-                    " parameter %d", static_cast<int>(row + 1)));
+                    " integer parameter %d", static_cast<int>(row + 1)));
                 compactLabels_[row][column] = label;
                 auto* field = new wxTextCtrl(this, wxID_ANY);
                 field->SetName(titles[column] + wxString::Format(
                     " parameter %d", static_cast<int>(row + 1)));
-                field->SetToolTip(field->GetName());
+                field->SetToolTip(titles[column] + wxString::Format(
+                    " integer parameter %d", static_cast<int>(row + 1)));
                 cells_[row][column] = field;
-                strip->Add(label, 0, wxALIGN_CENTER_VERTICAL);
-                strip->Add(field, 0, wxALIGN_CENTER_VERTICAL);
             }
-            form->Add(strip, 0);
         }
-        compactSizer_ = form;
+        compactSizer_ = new wxBoxSizer(wxVERTICAL);
         grid_ = new wxGrid(this, wxID_ANY);
         grid_->SetName("NeoDLG conversation parameter grid");
         grid_->CreateGrid(5, 2);
@@ -253,8 +222,12 @@ public:
         root->Add(grid_, 1, wxEXPAND);
         root->Add(compactSizer_, 0, wxEXPAND);
         SetSizer(root);
-        compactSizer_->ShowItems(false);
         RefreshFieldMetrics();
+    }
+
+    void ConfigureScriptRow(std::size_t column, wxWindow* scriptLabel, wxTextCtrl* script,
+                            wxWindow* textLabel, wxTextCtrl* text, wxWindow* negation = nullptr) {
+        scriptRows_.at(column) = {scriptLabel, script, textLabel, text, negation};
     }
 
     void SetSinglePanel(bool singlePanel) {
@@ -273,11 +246,44 @@ public:
                                         cells_[row][column]->GetValue());
             }
         }
+        // Detach before reparenting. Sizers never own the borrowed controls,
+        // and clearing them must not hide or recreate contextual fields.
+        compactSizer_->Clear(false);
+        shownGroups_ = {};
+        rowIndices_ = {};
+        if (singlePanel) {
+            conversationTabOrder_.clear();
+            for (auto* child : GetParent()->GetChildren()) conversationTabOrder_.push_back(child);
+        }
+        for (const auto& slot : scriptRows_) {
+            for (auto* window : slot) {
+                if (!window) continue;
+                if (auto* sizer = window->GetContainingSizer()) sizer->Detach(window);
+                window->Reparent(singlePanel ? this : GetParent());
+            }
+        }
+        if (!singlePanel) {
+            wxWindow* previous = nullptr;
+            for (auto* window : conversationTabOrder_) {
+                if (previous) window->MoveAfterInTabOrder(previous);
+                previous = window;
+            }
+            conversationTabOrder_.clear();
+        }
         singlePanel_ = singlePanel;
         grid_->Show(!singlePanel);
-        compactSizer_->ShowItems(singlePanel);
         SetVisibleColumns(compactColumns_[0], compactColumns_[1]);
         RefreshFieldMetrics();
+    }
+
+    // Existing callers show/hide the *parameter bank*. In Single Panel this
+    // window also hosts the script itself, which must stay usable in K1/Jade
+    // and for blank scripts even while both parameter banks are collapsed.
+    bool Show(bool show = true) override {
+        parameterGroupsShown_ = show;
+        const bool changed = RefreshCompactVisibility();
+        ReflowCompactRows();
+        return changed;
     }
 
     wxString GetCellValue(std::size_t row, std::size_t column) const {
@@ -311,12 +317,11 @@ public:
         if (columns != compactColumns_) CommitGridEditor();
         compactColumns_ = columns;
         for (std::size_t column = 0; column < compactColumns_.size(); ++column) {
-            const bool show = compactColumns_[column];
-            if (show) grid_->ShowCol(static_cast<int>(column));
+            if (compactColumns_[column]) grid_->ShowCol(static_cast<int>(column));
             else grid_->HideCol(static_cast<int>(column));
-            compactTitles_[column]->Show(singlePanel_ && show);
-            compactSizer_->Show(compactRows_[column], singlePanel_ && show);
         }
+        RefreshCompactVisibility();
+        ReflowCompactRows();
         InvalidateBestSize();
     }
 
@@ -336,6 +341,7 @@ public:
 
     void SetAvailableWidth(int width) {
         availableWidth_ = std::max(1, width);
+        RefreshCompactVisibility();
         ReflowCompactRows();
     }
 
@@ -353,29 +359,88 @@ public:
                 field->InvalidateBestSize();
             }
         }
+        RefreshCompactVisibility();
         ReflowCompactRows();
         InvalidateBestSize();
         Layout();
     }
 
 private:
+    bool RefreshCompactVisibility() {
+        bool hasRow = false;
+        for (std::size_t column = 0; column < cells_[0].size(); ++column) {
+            const bool parameters = singlePanel_ && parameterGroupsShown_ && compactColumns_[column];
+            compactTitles_[column]->Show(parameters && !scriptRows_[column][1]);
+            for (std::size_t row = 0; row < cells_.size(); ++row) {
+                compactLabels_[row][column]->Show(parameters);
+                cells_[row][column]->Show(parameters);
+            }
+            hasRow = hasRow || parameters;
+            // Test local visibility: the host may currently be hidden while a
+            // new node/dialect is revealing its child controls.
+            for (std::size_t i : {std::size_t{1}, std::size_t{3}, std::size_t{4}}) {
+                auto* control = scriptRows_[column][i];
+                hasRow = hasRow || (control && control->IsShown());
+            }
+        }
+        return wxPanel::Show(singlePanel_ ? hasRow : parameterGroupsShown_);
+    }
+
     void ReflowCompactRows() {
         if (!singlePanel_) return;
-        // Use the enclosing scroll viewport, not this panel's cached best size.
-        // Invalidate upwards after changing the column count so FitInside sees
-        // the extra rows immediately on a narrow resize or font-scale change.
-        int titleWidth = 0;
-        for (auto* title : compactTitles_)
-            titleWidth = std::max(titleWidth, title->GetEffectiveMinSize().x);
-        const int width = std::max(1, availableWidth_ - titleWidth - FromDIP(8));
-        for (std::size_t column = 0; column < compactRows_.size(); ++column) {
-            std::vector<std::array<int, 2>> widths;
-            for (std::size_t row = 0; row < cells_.size(); ++row) {
-                widths.push_back({compactLabels_[row][column]->GetEffectiveMinSize().x,
-                                  cells_[row][column]->GetEffectiveMinSize().x});
+        const int fieldGap = FromDIP(3), groupGap = FromDIP(6);
+        std::array<std::vector<std::vector<wxWindow*>>, 2> groups;
+        std::array<std::vector<int>, 2> indices;
+        for (std::size_t column = 0; column < groups.size(); ++column) {
+            std::vector<int> widths;
+            const auto add = [&](wxWindow* label, wxWindow* control) {
+                if (!control || !control->IsShown()) return;
+                std::vector<wxWindow*> parts;
+                if (label && label->IsShown()) parts.push_back(label);
+                parts.push_back(control);
+                std::int64_t width = static_cast<std::int64_t>(fieldGap) * (parts.size() - 1);
+                for (auto* part : parts) width += std::max(0, part->GetEffectiveMinSize().x);
+                widths.push_back(static_cast<int>(std::min<std::int64_t>(
+                    width, std::numeric_limits<int>::max())));
+                groups[column].push_back(std::move(parts));
+            };
+            const auto& slot = scriptRows_[column];
+            add(slot[0], slot[1]);                       // Script name.
+            add(nullptr, slot[4]);                       // This condition's negation.
+            add(slot[2], slot[3]);                       // This script's text argument.
+            if (!slot[1]) add(nullptr, compactTitles_[column]);
+            for (std::size_t row = 0; row < cells_.size(); ++row)
+                add(compactLabels_[row][column], cells_[row][column]);
+            // Start each script on its own logical row. Narrow layouts wrap
+            // within that slot before the next script starts; never mix A/B.
+            indices[column] = inspectorFieldRows(widths, availableWidth_, groupGap);
+        }
+        if (groups == shownGroups_ && indices == rowIndices_) return;
+        compactSizer_->Clear(false);
+        shownGroups_ = std::move(groups);
+        rowIndices_ = std::move(indices);
+        wxWindow* previous = nullptr;
+        bool hasLine = false;
+        for (std::size_t column = 0; column < shownGroups_.size(); ++column) {
+            wxBoxSizer* line = nullptr;
+            int previousRow = -1;
+            for (std::size_t i = 0; i < shownGroups_[column].size(); ++i) {
+                const bool newLine = rowIndices_[column][i] != previousRow;
+                if (newLine) {
+                    line = new wxBoxSizer(wxHORIZONTAL);
+                    compactSizer_->Add(line, 0, wxEXPAND | wxTOP, hasLine ? FromDIP(3) : 0);
+                    hasLine = true;
+                    previousRow = rowIndices_[column][i];
+                }
+                auto* group = new wxBoxSizer(wxHORIZONTAL);
+                for (std::size_t j = 0; j < shownGroups_[column][i].size(); ++j) {
+                    auto* window = shownGroups_[column][i][j];
+                    group->Add(window, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, j ? fieldGap : 0);
+                    if (previous) window->MoveAfterInTabOrder(previous);
+                    previous = window;
+                }
+                line->Add(group, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, newLine ? 0 : groupGap);
             }
-            const int columns = inspectorFieldColumns(widths, width, FromDIP(4), 5);
-            compactRows_[column]->SetCols(2 * columns);
         }
         InvalidateBestSize();
     }
@@ -393,11 +458,16 @@ private:
     std::array<std::array<bool, 2>, 5> gridEdited_{};
     std::array<std::array<wxStaticText*, 2>, 5> compactLabels_{};
     std::array<wxStaticText*, 2> compactTitles_{};
-    std::array<wxFlexGridSizer*, 2> compactRows_{};
+    // label, script, text label, text, optional condition-negation control.
+    std::array<std::array<wxWindow*, 5>, 2> scriptRows_{};
+    std::vector<wxWindow*> conversationTabOrder_;
+    std::array<std::vector<std::vector<wxWindow*>>, 2> shownGroups_;
+    std::array<std::vector<int>, 2> rowIndices_;
     int availableWidth_ = 1;
     wxGrid* grid_ = nullptr;
     wxSizer* compactSizer_ = nullptr;
     bool singlePanel_ = false;
+    bool parameterGroupsShown_ = true;
     std::array<bool, 2> compactColumns_{true, true};
 };
 
@@ -2040,10 +2110,10 @@ private:
         label(nodeCameraEntryLabel_, "Entry tag:", "Entry camera tag:");
         label(nodeScriptCamRepliesLabel_, "Replies-cam script:", "Replies-camera script:");
         label(nodeCameraRepliesLabel_, "Replies tag:", "Replies camera tag:");
-        label(nodeActionStrALabel_, "String A:", "Action string A:");
-        label(nodeActionStrBLabel_, "String B:", "Action string B:");
-        label(linkParamStrALabel_, "String A:", "Conditional string A:");
-        label(linkParamStrBLabel_, "String B:", "Conditional string B:");
+        label(nodeActionStrALabel_, "Text:", "Action string A:");
+        label(nodeActionStrBLabel_, "Text:", "Action string B:");
+        label(linkParamStrALabel_, "Text:", "Conditional string A:");
+        label(linkParamStrBLabel_, "Text:", "Conditional string B:");
         label(nodePlotXpLabel_, "Plot XP %:", "Plot XP percentage:");
         label(nodeCamHeightOffsetLabel_, "Camera offset:", "Camera height offset:");
         label(nodeTarHeightOffsetLabel_, "Target offset:", "Target height offset:");
@@ -2065,6 +2135,10 @@ private:
 
     void refreshCompactInspectorMetrics() {
         refreshInspectorFieldLabels();
+        if (singlePanelActive_) {
+            actionParamHeading_->Hide();
+            linkParamHeading_->Hide();
+        }
         for (auto* editor : resizableInspectorText_) {
             editor->Show(editor->Text()->IsShown());
             editor->SetSinglePanel(singlePanelActive_);
@@ -2282,7 +2356,8 @@ private:
         };
         const auto parameters = [&](wxSizer* root, wxWindow* title, IntegerParameterFields* fields) {
             if (!singlePanel && !fields->IsShown()) return;
-            root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, pad);
+            title->Show(!singlePanel && fields->IsShown());
+            if (!singlePanel) root->Add(title, 0, wxLEFT | wxRIGHT | wxTOP, pad);
             root->Add(fields, 0, wxEXPAND | wxALL, pad);
         };
 
@@ -2316,10 +2391,9 @@ private:
             } else if (index == 1) {
                 auto* form = newForm();
                 if (singlePanel) {
-                    band(root, {{nodeScript1Label_, nodeScript1_}, {nodeScript2Label_, nodeScript2_},
-                                {nodeScriptCamEntryLabel_, nodeScriptCamEntry_}, {nodeCameraEntryLabel_, nodeCameraEntry_},
+                    parameters(root, actionParamHeading_, actionParamFields_);
+                    band(root, {{nodeScriptCamEntryLabel_, nodeScriptCamEntry_}, {nodeCameraEntryLabel_, nodeCameraEntry_},
                                 {nodeScriptCamRepliesLabel_, nodeScriptCamReplies_}, {nodeCameraRepliesLabel_, nodeCameraReplies_},
-                                {nodeActionStrALabel_, nodeActionStrA_}, {nodeActionStrBLabel_, nodeActionStrB_},
                                 {nodeQuestLabel_, nodeQuest_}, {nodeQuestEntryLabel_, nodeQuestEntry_},
                                 {nodePlotIndexLabel_, nodePlotIndex_}, {nodePlotXpLabel_, nodePlotXp_}});
                     delete form; // No expanded single-column form in this view.
@@ -2332,7 +2406,7 @@ private:
                                 {nodeActionStrALabel_, nodeActionStrA_}, {nodeActionStrBLabel_, nodeActionStrB_}});
                     addForm(root, form);
                 }
-                parameters(root, actionParamHeading_, actionParamFields_);
+                if (!singlePanel) parameters(root, actionParamHeading_, actionParamFields_);
                 apply(root, page, ID_ApplyScripts);
             } else if (index == 2) {
                 root->Add(jadePresentationNote_, 0, wxEXPAND | wxALL, pad);
@@ -2399,10 +2473,8 @@ private:
                 root->Add(linkHeader_, 0, wxEXPAND | wxALL, pad);
                 auto* form = newForm();
                 if (singlePanel) {
-                    band(root, {{linkActive1Label_, linkActive1_}, {nullptr, linkNot1_},
-                                {linkActive2Label_, linkActive2_}, {nullptr, linkNot2_},
-                                {linkParamStrALabel_, linkParamStrA_}, {linkParamStrBLabel_, linkParamStrB_},
-                                {linkLogicLabel_, linkLogic_}, {linkDesignerNumberLabel_, linkDesignerNumber_},
+                    parameters(root, linkParamHeading_, linkParamFields_);
+                    band(root, {{linkLogicLabel_, linkLogic_}, {linkDesignerNumberLabel_, linkDesignerNumber_},
                                 {nullptr, linkReverseCond_}, {nullptr, linkDisplayInactive_}});
                     delete form;
                 } else {
@@ -2416,7 +2488,7 @@ private:
                 }
                 if (!singlePanel && linkDisplayInactive_->IsShown())
                     root->Add(linkDisplayInactive_, 0, wxLEFT | wxRIGHT | wxBOTTOM, pad);
-                parameters(root, linkParamHeading_, linkParamFields_);
+                if (!singlePanel) parameters(root, linkParamHeading_, linkParamFields_);
                 apply(root, page, ID_ApplyLink);
             } else if (singlePanel) {
                 // One small action/status row; never stretch the last button.
@@ -2691,6 +2763,10 @@ private:
         root->Add(actionParamHeading_, 0, wxLEFT | wxRIGHT | wxTOP, 10);
         actionParamFields_ = new IntegerParameterFields(page, "Script 1", "Script 2");
         actionParamFields_->SetName("NeoDLG action parameters");
+        actionParamFields_->ConfigureScriptRow(0, nodeScript1Label_, nodeScript1_,
+                                              nodeActionStrALabel_, nodeActionStrA_);
+        actionParamFields_->ConfigureScriptRow(1, nodeScript2Label_, nodeScript2_,
+                                              nodeActionStrBLabel_, nodeActionStrB_);
         root->Add(actionParamFields_, 0, wxEXPAND | wxALL, 10);
         nodeCameraEntry_->SetToolTip(
             "Free-form Jade camera tag exposed to scripts; NeoDLG stores it in lowercase.");
@@ -3041,6 +3117,10 @@ private:
         root->Add(linkParamHeading_, 0, wxLEFT | wxRIGHT | wxTOP, 10);
         linkParamFields_ = new IntegerParameterFields(page, "Conditional 1", "Conditional 2");
         linkParamFields_->SetName("NeoDLG link parameters");
+        linkParamFields_->ConfigureScriptRow(0, linkActive1Label_, linkActive1_,
+                                            linkParamStrALabel_, linkParamStrA_, linkNot1_);
+        linkParamFields_->ConfigureScriptRow(1, linkActive2Label_, linkActive2_,
+                                            linkParamStrBLabel_, linkParamStrB_, linkNot2_);
         root->Add(linkParamFields_, 0, wxEXPAND | wxALL, 10);
         root->Add(new wxButton(page, ID_ApplyLink, "Apply Link Conditions"), 0, wxALIGN_RIGHT | wxALL, 10);
     }
