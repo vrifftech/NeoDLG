@@ -76,6 +76,119 @@ namespace {
 
 using namespace neodlg;
 
+// A GFF dirty bit records that a setter ran, not whether the document differs
+// from what was opened/saved. Keep an exact, in-memory checkpoint for classic
+// DLGs. This is not a file format and never rewrites or normalizes the resource.
+// Raw scalar bits avoid XML/display rounding, NaN and signed-zero ambiguities.
+std::optional<std::string> dlgContentCheckpoint(const GffModel& model) {
+    const auto& file = model.gff();
+    if (!file.loaded() || file.isGff4() || !file.root()) return std::nullopt;
+
+    std::string result;
+    const auto scalar = [&](const auto& value) {
+        result.append(reinterpret_cast<const char*>(&value), sizeof(value));
+    };
+    const auto bytes = [&](const auto& values) {
+        const std::uint64_t size = values.size();
+        scalar(size);
+        if (!values.empty())
+            result.append(reinterpret_cast<const char*>(values.data()), values.size());
+    };
+    bytes(file.filetype());
+    bytes(file.version());
+
+    // Traverse stored fields, not dialogue graph links; cycles in a DLG do not
+    // become recursion here. Include duplicate labels, order and empty values.
+    std::vector<const GffField*> pending{file.root()};
+    while (!pending.empty()) {
+        const GffField* field = pending.back();
+        pending.pop_back();
+        scalar(field != nullptr);
+        if (!field) continue;
+        scalar(field->fieldtype);
+        bytes(field->GetLabelRaw());
+        switch (field->fieldtype) {
+        case FIELD_TYPE_STRUCT: {
+            const auto& value = dynamic_cast<const GffStruct&>(*field);
+            scalar(value.typeid_);
+            scalar(static_cast<std::uint64_t>(value.count()));
+            for (auto it = value.allFields().rbegin(); it != value.allFields().rend(); ++it)
+                pending.push_back(it->get());
+            break;
+        }
+        case FIELD_TYPE_LIST: {
+            const auto& value = dynamic_cast<const GffList&>(*field);
+            scalar(static_cast<std::uint64_t>(value.count()));
+            for (auto it = value.allStructs().rbegin(); it != value.allStructs().rend(); ++it)
+                pending.push_back(it->get());
+            break;
+        }
+        case FIELD_TYPE_BYTE: scalar(dynamic_cast<const GffByteField&>(*field).value); break;
+        case FIELD_TYPE_CHAR: scalar(dynamic_cast<const GffCharField&>(*field).value); break;
+        case FIELD_TYPE_WORD: scalar(dynamic_cast<const GffWordField&>(*field).value); break;
+        case FIELD_TYPE_SHORT: scalar(dynamic_cast<const GffShortField&>(*field).value); break;
+        case FIELD_TYPE_DWORD: scalar(dynamic_cast<const GffUInt32Field&>(*field).value); break;
+        case FIELD_TYPE_INT: scalar(dynamic_cast<const GffIntField&>(*field).value); break;
+        case FIELD_TYPE_DWORD64: scalar(dynamic_cast<const GffUInt64Field&>(*field).value); break;
+        case FIELD_TYPE_INT64: scalar(dynamic_cast<const GffInt64Field&>(*field).value); break;
+        case FIELD_TYPE_FLOAT: scalar(dynamic_cast<const GffFloatField&>(*field).value); break;
+        case FIELD_TYPE_DOUBLE: scalar(dynamic_cast<const GffDoubleField&>(*field).value); break;
+        case FIELD_TYPE_CEXOSTRING: {
+            const auto& value = dynamic_cast<const GffExoStringField&>(*field);
+            scalar(value.size); bytes(value.textData);
+            break;
+        }
+        case FIELD_TYPE_RESREF: {
+            const auto& value = dynamic_cast<const GffResRefField&>(*field);
+            scalar(value.size); bytes(value.textData);
+            break;
+        }
+        case FIELD_TYPE_CEXOLOCSTRING: {
+            const auto& value = dynamic_cast<const GffLocalizedStringField&>(*field);
+            scalar(value.bytesize); scalar(value.strref); scalar(value.stringcount);
+            scalar(static_cast<std::uint64_t>(value.substrings.size()));
+            for (const auto& substring : value.substrings) {
+                scalar(substring.stringid); scalar(substring.stringlength);
+                bytes(substring.textData);
+            }
+            break;
+        }
+        case FIELD_TYPE_VOID: {
+            const auto& value = dynamic_cast<const GffVoidField&>(*field);
+            scalar(value.bytesize); bytes(value.data);
+            break;
+        }
+        case FIELD_TYPE_ORIENTATION:
+            for (float value : dynamic_cast<const GffOrientationField&>(*field).value) scalar(value);
+            break;
+        case FIELD_TYPE_POSITION:
+            for (float value : dynamic_cast<const GffPositionField&>(*field).value) scalar(value);
+            break;
+        case FIELD_TYPE_JADE_STRREF: {
+            const auto& value = dynamic_cast<const GffJadeStringRefField&>(*field);
+            scalar(value.stringType); scalar(value.strref);
+            break;
+        }
+        default:
+            // Unknown representations keep the original dirty-bit behavior.
+            return std::nullopt;
+        }
+    }
+    return result;
+}
+
+bool dlgDiffersFromCheckpoint(const GffModel& model,
+                              const std::optional<std::string>& savedContents) {
+    if (!savedContents) return model.dirty(); // New document or unsupported format.
+    try {
+        const auto current = dlgContentCheckpoint(model);
+        return !current || *current != *savedContents;
+    } catch (...) {
+        // Never suppress a close warning when comparison cannot be completed.
+        return true;
+    }
+}
+
 constexpr const char* kAppName = "NeoDLG";
 constexpr const char* kDlgWildcard = "DLG conversation files (*.dlg)|*.dlg|All files (*.*)|*.*";
 constexpr const char* kTlkWildcard = "TLK files (*.tlk)|*.tlk|All files (*.*)|*.*";
@@ -1531,11 +1644,13 @@ public:
         if (activateResource(input.identity)) return true;
         auto candidate = std::make_unique<GffModel>();
         neoshared::loadGffResource(input, candidate->gff(), "DLG ");
+        auto savedContents = dlgContentCheckpoint(*candidate);
 
         // Parse before creating/replacing a tab, so a failed load leaves the UI intact.
         ensureTabForOpen();
         auto& document = activeDocument();
         document.model = std::move(candidate);
+        document.savedContents = std::move(savedContents);
         document.logicalFilename.clear();
         document.resourceIdentity = std::move(input.identity);
         document.sourceDescription = std::move(input.sourceDescription);
@@ -1591,6 +1706,9 @@ private:
 
     struct DocumentTab {
         std::unique_ptr<GffModel> model = std::make_unique<GffModel>();
+        // Recorded before displaying a loaded resource, and only advanced by a
+        // successful save. Refreshing/selecting/exporting never resets it.
+        std::optional<std::string> savedContents;
         std::filesystem::path logicalFilename;
         std::string resourceIdentity;
         std::string sourceDescription;
@@ -1646,7 +1764,13 @@ private:
     }
 
     bool tabDirty(const DocumentTab& tab) const {
-        return tab.saveInProgress || (tab.model && tab.model->dirty());
+        return tab.saveInProgress ||
+               (tab.model && dlgDiffersFromCheckpoint(*tab.model, tab.savedContents));
+    }
+
+    void synchronizeDocumentDirty(DocumentTab& tab) {
+        if (tab.model && tab.savedContents)
+            tab.model->gff().dirty(dlgDiffersFromCheckpoint(*tab.model, tab.savedContents));
     }
 
     std::string tabDisplayName(const DocumentTab& tab) const {
@@ -3415,6 +3539,7 @@ private:
             if (!activeTabReusable()) createDocumentTab(true);
             DlgDocument document(model());
             document.create(flavor);
+            activeDocument().savedContents.reset(); // A new, unsaved DLG is still modified.
             activeDocument().logicalFilename.clear();
 #if defined(__EMSCRIPTEN__)
             activeDocument().sourceImport.reset();
@@ -3472,8 +3597,10 @@ private:
             throw std::invalid_argument("The selected file is not a DLG resource.");
         }
 
+        auto savedContents = dlgContentCheckpoint(*candidate);
         ensureTabForOpen();
         activeDocument().model = std::move(candidate);
+        activeDocument().savedContents = std::move(savedContents);
         activeDocument().logicalFilename = path;
         activeDocument().resourceIdentity.clear();
         activeDocument().sourceDescription.clear();
@@ -3584,6 +3711,9 @@ private:
 #if defined(__EMSCRIPTEN__)
             const bool wasDirty = document.model->dirty();
 #endif
+            // Prepare before writing so a failed save cannot advance the
+            // checkpoint. Browser saves commit only in the success callback.
+            auto savedContents = dlgContentCheckpoint(*document.model);
             document.model->save(target);
 
 #if defined(__EMSCRIPTEN__)
@@ -3598,7 +3728,8 @@ private:
             neobrowser::requestDownloadFile(
                 target,
                 target.filename().string(),
-                [weakSelf, targetPage, target, wasDirty](neobrowser::DownloadResult result) {
+                [weakSelf, targetPage, target, wasDirty, savedContents = std::move(savedContents)]
+                (neobrowser::DownloadResult result) mutable {
                     if (!weakSelf || weakSelf->IsBeingDeleted()) return;
                     auto* const frame = weakSelf.get();
                     frame->browserSaveActive_ = false;
@@ -3612,6 +3743,7 @@ private:
                     savedDocument.saveInProgress = false;
                     if (!result.error.empty() || result.cancelled()) {
                         savedDocument.model->gff().dirty(wasDirty);
+                        frame->synchronizeDocumentDirty(savedDocument);
                         frame->updateDocumentTabTitle(savedDocument);
                         if (index == frame->activeDocumentIndex_) frame->refreshHeader();
                         const std::string message = result.error.empty()
@@ -3623,7 +3755,9 @@ private:
                     }
 
                     savedDocument.logicalFilename = target;
+                    savedDocument.savedContents = std::move(savedContents);
                     savedDocument.model->gff().dirty(false);
+                    frame->synchronizeDocumentDirty(savedDocument);
                     if (!frame->importOwnsPath(savedDocument.sourceImport, target)) {
                         savedDocument.sourceImport.reset();
                     }
@@ -3643,7 +3777,9 @@ private:
             return true;
 #else
             document.logicalFilename = target;
+            document.savedContents = std::move(savedContents);
             document.model->gff().dirty(false);
+            synchronizeDocumentDirty(document);
             rememberRecentFile(target);
             neogames::resolver().inferFromOpenedPath(target);
             updateTabTitle();
@@ -4670,12 +4806,13 @@ private:
     void refreshAll() {
         if (!hasActiveDocument()) return;
 
-        refreshHeader();
-        updateTabTitle();
-        refreshUndoMenu();
         if (activeDocument().workspaceView == WorkspaceView::Raw) refreshRawTree();
         else refreshConversationTree();
         refreshInspector();
+        synchronizeDocumentDirty(activeDocument());
+        refreshHeader();
+        updateTabTitle();
+        refreshUndoMenu();
     }
 
     void refreshHeader() {
@@ -4687,7 +4824,7 @@ private:
 
         wxString primary = activeDocument().saveInProgress
             ? "Saving..."
-            : (model().dirty() ? "Modified" : "Saved");
+            : (tabDirty(activeDocument()) ? "Modified" : "Saved");
         primary += " - ";
         primary += wxui::toWx(tabDisplayName(activeDocument()));
         setModuleStatusText(primary, 0);
