@@ -1,5 +1,4 @@
 #include "core/AppModel.hpp"
-#include "neodlg/model/DlgFieldRemoval.hpp"
 #include "TabularData.hpp"
 #include "core/GffJson.hpp"
 #include "core/Version.hpp"
@@ -112,7 +111,7 @@ PatchOutputOptions parsePatchOutputOptions(int argc, char** argv, int begin, con
 
 void writePatchOutput(const neotsl::PatchProject& project, const std::filesystem::path& output, const PatchOutputOptions& options) {
     if (!options.allowUnsupported) neotsl::throwIfUnsupported(project);
-    else neotsl::printReport(project);
+    neotsl::printReport(project);
     if (options.package) {
         const std::filesystem::path iniPath = options.iniFilename.is_absolute()
             ? options.iniFilename
@@ -284,15 +283,15 @@ void loadGffFromImport(GffModel& model,
     if (formatName.empty() || formatName == "auto") formatName = extensionImportFormat(inputPath);
 
     if (isNativeGffImportFormat(formatName)) {
-        neodlg::loadDlgModel(model, inputPath);
+        model.load(inputPath);
         return;
     }
 
     const auto format = neotabular::parseFormat(formatName);
     if (format == neotabular::Format::Xml) {
-        neodlg::importDlgModelXml(model, readTextFile(inputPath));
+        model.importXml(readTextFile(inputPath));
     } else if (format == neotabular::Format::Json) {
-        neodlg::importDlgModelXml(model, neodlg::gffJsonToXml(readTextFile(inputPath)));
+        model.importXml(neodlg::gffJsonToXml(readTextFile(inputPath)));
     } else {
         throw std::runtime_error("NeoDLG supports XML/JSON or native DLG/GFF import for patcher generation; CSV/TSV flattened imports are not supported.");
     }
@@ -321,7 +320,7 @@ int main(int argc, char** argv) {
             const auto parsed = splitTlkOption(argc, argv, 2);
             if (parsed.positional.size() != 1) { usage(std::cerr); return 2; }
             GffModel model;
-            neodlg::loadDlgModel(model, parsed.positional[0]);
+            model.load(parsed.positional[0]);
             applyOptionalTlk(model, parsed.tlk);
             printInfo(model);
             return 0;
@@ -331,7 +330,7 @@ int main(int argc, char** argv) {
             const auto parsed = splitTlkOption(argc, argv, 2);
             if (parsed.positional.size() < 1 || parsed.positional.size() > 2) { usage(std::cerr); return 2; }
             GffModel model;
-            neodlg::loadDlgModel(model, parsed.positional[0]);
+            model.load(parsed.positional[0]);
             applyOptionalTlk(model, parsed.tlk);
             dumpRows(model, parsed.positional.size() == 2 ? parsed.positional[1] : std::string{});
             return 0;
@@ -341,7 +340,7 @@ int main(int argc, char** argv) {
             const auto parsed = splitTlkOption(argc, argv, 2);
             if (parsed.positional.size() != 2) { usage(std::cerr); return 2; }
             GffModel model;
-            neodlg::loadDlgModel(model, parsed.positional[0]);
+            model.load(parsed.positional[0]);
             applyOptionalTlk(model, parsed.tlk);
             dumpRows(model, parsed.positional[1]);
             return 0;
@@ -351,7 +350,7 @@ int main(int argc, char** argv) {
             if (argc < 5 || argc > 6) { usage(std::cerr); return 2; }
             const auto format = neotabular::parseFormat(argv[3]);
             GffModel model;
-            neodlg::loadDlgModel(model, argv[2]);
+            model.load(argv[2]);
             if (format == neotabular::Format::Xml) {
                 if (argc == 6) {
                     throw std::invalid_argument("Hierarchical DLG XML export preserves hierarchy and does not support row filtering.");
@@ -373,13 +372,13 @@ int main(int argc, char** argv) {
             const auto format = neotabular::parseFormat(argv[4]);
             GffModel model;
             if (format == neotabular::Format::Xml) {
-                neodlg::importDlgModelXml(model, readTextFile(argv[5]));
+                model.importXml(readTextFile(argv[5]));
             } else if (format == neotabular::Format::Json) {
-                neodlg::importDlgModelXml(model, neodlg::gffJsonToXml(readTextFile(argv[5])));
+                model.importXml(neodlg::gffJsonToXml(readTextFile(argv[5])));
             } else {
                 throw std::invalid_argument("NeoDLG imports only semantic XML or JSON. CSV/TSV flattened import is not supported for DLG files.");
             }
-            neodlg::saveDlgModel(model, argv[3]);
+            model.save(argv[3]);
             return 0;
         }
 
@@ -413,8 +412,8 @@ int main(int argc, char** argv) {
         if (command == "roundtrip") {
             if (argc != 4) { usage(std::cerr); return 2; }
             GffModel model;
-            neodlg::loadDlgModel(model, argv[2]);
-            neodlg::saveDlgModel(model, argv[3]);
+            model.load(argv[2]);
+            model.save(argv[3]);
             return 0;
         }
 
@@ -424,40 +423,36 @@ int main(int argc, char** argv) {
             const std::string type = argc == 4 ? std::string(argv[3]) : std::string("DLG ");
             GffModel model;
             model.newFile(type);
-            neodlg::saveDlgModel(model, output);
+            model.save(output);
             return 0;
         }
 
         if (command == "set-value") {
             if (argc != 6) { usage(std::cerr); return 2; }
             GffModel model;
-            neodlg::loadDlgModel(model, argv[2]);
+            model.load(argv[2]);
             model.setValue(argv[4], argv[5]);
-            neodlg::saveDlgModel(model, argv[3]);
+            model.save(argv[3]);
             return 0;
         }
 
         if (command == "add-field") {
             if (argc < 7 || argc > 9) { usage(std::cerr); return 2; }
             GffModel model;
-            neodlg::loadDlgModel(model, argv[2]);
+            model.load(argv[2]);
             const std::string value = argc >= 8 ? std::string(argv[7]) : std::string{};
             const std::uint32_t typeId = argc >= 9 ? parseStructTypeId(argv[8]) : 0u;
-            if (neodlg::isDlgResource(model) && neodlg::isRetiredDlgField(argv[5]))
-                throw std::invalid_argument("This field has been removed from NeoDLG: " + std::string(argv[5]));
             model.addField(normalizeParentPath(argv[4]), argv[5], argv[6], value, typeId);
-            neodlg::saveDlgModel(model, argv[3]);
+            model.save(argv[3]);
             return 0;
         }
 
         if (command == "delete-field") {
             if (argc != 5) { usage(std::cerr); return 2; }
             GffModel model;
-            // Resolve the explicitly requested path before automatic cleanup;
-            // it may itself name one of the retired fields.
             model.load(argv[2]);
             model.deleteField(argv[4]);
-            neodlg::saveDlgModel(model, argv[3]);
+            model.save(argv[3]);
             return 0;
         }
 

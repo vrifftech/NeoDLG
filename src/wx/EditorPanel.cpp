@@ -1531,7 +1531,7 @@ public:
         if (activateResource(input.identity)) return true;
         auto candidate = std::make_unique<GffModel>();
         neoshared::loadGffResource(input, candidate->gff(), "DLG ");
-        removeRetiredDlgFields(*candidate);
+
         // Parse before creating/replacing a tab, so a failed load leaves the UI intact.
         ensureTabForOpen();
         auto& document = activeDocument();
@@ -2207,6 +2207,10 @@ private:
         scalar(nodeFadeDelay_, nodeFadeDelayLabel_, "0.000");
         scalar(nodeFadeLength_, nodeFadeLengthLabel_, "0.000");
         scalar(nodeAlienRace_, nodeAlienRaceLabel_, "000");
+        scalar(nodePostProc_, nodePostProcLabel_, "000");
+        scalar(nodeRecordVo_, nodeRecordVoLabel_, "00");
+        scalar(nodeRecordNoVoOverride_, nodeRecordNoVoOverrideLabel_, "00");
+        scalar(linkIsChild_, linkIsChildLabel_, "00");
         scalar(linkLogic_, linkLogicLabel_, "00");
         scalar(linkDesignerNumber_, linkDesignerNumberLabel_, "-0000");
 
@@ -2437,6 +2441,8 @@ private:
                                 {nodeCamVidEffectLabel_, nodeCamVidEffectPanel_},
                                 {nodeEmotionLabel_, nodeEmotion_}, {nodeFacialAnimLabel_, nodeFacialAnim_},
                                 {nodeAlienRaceLabel_, nodeAlienRace_}, {nullptr, nodeUnskippable_},
+                                {nodePostProcLabel_, nodePostProc_}, {nodeRecordVoLabel_, nodeRecordVo_},
+                                {nodeRecordNoVoOverrideLabel_, nodeRecordNoVoOverride_},
                                 {nodeFadeTypeLabel_, nodeFadeType_},
                                 {nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
                                 {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_},
@@ -2478,7 +2484,9 @@ private:
                     rows(form, {{nodeFadeDelayLabel_, nodeFadeDelay_, nodeFadeDelayUnit_},
                                 {nodeFadeLengthLabel_, nodeFadeLength_, nodeFadeLengthUnit_},
                                 {nodeAlienRaceLabel_, nodeAlienRace_},
-                                {nodeUnskippablePlaceholder_, nodeUnskippable_}});
+                                {nodeUnskippablePlaceholder_, nodeUnskippable_},
+                                {nodePostProcLabel_, nodePostProc_}, {nodeRecordVoLabel_, nodeRecordVo_},
+                                {nodeRecordNoVoOverrideLabel_, nodeRecordNoVoOverride_}});
                     addForm(root, form, 1);
                 }
                 apply(root, page, ID_ApplyPresentation);
@@ -2488,15 +2496,18 @@ private:
                 if (singlePanel) {
                     parameters(root, linkParamHeading_, linkParamFields_);
                     band(root, {{linkLogicLabel_, linkLogic_}, {linkDesignerNumberLabel_, linkDesignerNumber_},
-                                {nullptr, linkReverseCond_}, {nullptr, linkDisplayInactive_}});
-                    delete form;
+                                {nullptr, linkReverseCond_}, {nullptr, linkDisplayInactive_},
+                                {linkIsChildLabel_, linkIsChild_}});
+                    row(form, {linkCommentLabel_, linkComment_});
+                    addForm(root, form);
                 } else {
                     rows(form, {{linkActive1Label_, linkActive1_}, {linkActive2Label_, linkActive2_},
                                 {linkLogicLabel_, linkLogic_}, {linkParamStrALabel_, linkParamStrA_},
                                 {linkParamStrBLabel_, linkParamStrB_},
                                 {linkDesignerNumberLabel_, linkDesignerNumber_}, {linkNot1Placeholder_, linkNot1_},
                                 {linkNot2Placeholder_, linkNot2_},
-                                {linkReverseCondPlaceholder_, linkReverseCond_}});
+                                {linkReverseCondPlaceholder_, linkReverseCond_},
+                                {linkIsChildLabel_, linkIsChild_}, {linkCommentLabel_, linkComment_}});
                     addForm(root, form);
                 }
                 if (!singlePanel && linkDisplayInactive_->IsShown())
@@ -2794,7 +2805,8 @@ private:
         jadePresentationNote_ = new wxStaticText(
             page, wxID_ANY,
             "Jade Empire dialogue presentation is controlled by Entry camera scripts/tags and the Animations page. "
-            "KotOR camera, fade, delay, sound, and post-processing fields do not belong to the Jade DLG runtime schema.");
+            "KotOR camera, fade, delay, and sound controls are not used here. "
+            "Other properties are shown only when stored in this node.");
         jadePresentationNote_->Wrap(FromDIP(520));
         jadePresentationNote_->Hide();
         root->Add(jadePresentationNote_, 0, wxEXPAND | wxALL, 10);
@@ -2884,6 +2896,12 @@ private:
         nodeFadeLength_ = addTextFieldWithUnit(page, form, "Fade length:", "seconds",
                                                 &nodeFadeLengthLabel_, &nodeFadeLengthUnit_);
 
+        nodePostProc_ = addTextField(page, form, "Post-process node:", 0, wxDefaultSize, &nodePostProcLabel_);
+        nodeRecordVo_ = addTextField(page, form, "Record VO:", 0, wxDefaultSize, &nodeRecordVoLabel_);
+        nodeRecordNoVoOverride_ = addTextField(page, form, "No-VO override:", 0, wxDefaultSize, &nodeRecordNoVoOverrideLabel_);
+        for (auto* control : {nodePostProc_, nodeRecordVo_, nodeRecordNoVoOverride_})
+            control->SetToolTip("Existing field only. Its stored value and type are preserved unless you edit it. "
+                                "This does not imply a game-specific runtime meaning.");
         nodeAlienRace_ = addTextField(page, form, "Alien-race node:", 0, wxDefaultSize, &nodeAlienRaceLabel_);
         nodeUnskippable_ = addCheckField(page, form, "Node is unskippable", &nodeUnskippablePlaceholder_);
 
@@ -3120,6 +3138,10 @@ private:
         linkNot1_ = addCheckField(page, form, "Negate conditional 1", &linkNot1Placeholder_);
         linkNot2_ = addCheckField(page, form, "Negate conditional 2", &linkNot2Placeholder_);
         linkReverseCond_ = addCheckField(page, form, "Negate condition", &linkReverseCondPlaceholder_);
+        linkIsChild_ = addTextField(page, form, "IsChild:", 0, wxDefaultSize, &linkIsChildLabel_);
+        linkIsChild_->SetToolTip("Existing link field only. Nonzero values are not normalized to 1.");
+        linkComment_ = addResizableInspectorText(page, form, "Link comment:",
+            "NeoDLG link comment", &linkCommentLabel_);
         root->Add(form, 0, wxEXPAND | wxALL, 10);
 
         linkDisplayInactive_ = new wxCheckBox(page, wxID_ANY, "Display inactive reply");
@@ -3445,7 +3467,7 @@ private:
 
 
         auto candidate = std::make_unique<GffModel>();
-        loadDlgModel(*candidate, path);
+        candidate->load(path);
         if (!neoshared::sameGffResourceType(candidate->fileType(), "DLG ")) {
             throw std::invalid_argument("The selected file is not a DLG resource.");
         }
@@ -3558,11 +3580,11 @@ private:
             }
 
             checkDestination(target);
-            removeRetiredDlgFields(*document.model);
+
 #if defined(__EMSCRIPTEN__)
             const bool wasDirty = document.model->dirty();
 #endif
-            saveDlgModel(*document.model, target);
+            document.model->save(target);
 
 #if defined(__EMSCRIPTEN__)
             document.saveInProgress = true;
@@ -3725,11 +3747,10 @@ private:
             if (!model().gff().isGff4()) snapshot = model().toXml();
             try {
                 function();
-                removeRetiredDlgFields(model());
             } catch (...) {
                 if (!snapshot.empty()) {
                     try {
-                        importDlgModelXml(model(), snapshot);
+                        model().importXml(snapshot);
                     } catch (...) {
                         // Preserve the original operation error. The next open/save
                         // action can still recover from the on-disk file.
@@ -3757,7 +3778,7 @@ private:
             UndoSnapshot snapshot = std::move(activeDocument().undo.back());
             activeDocument().undo.pop_back();
             activeDocument().redo.push_back({snapshot.description, model().toXml()});
-            importDlgModelXml(model(), snapshot.xml);
+            model().importXml(snapshot.xml);
             refreshAll();
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
@@ -3768,7 +3789,7 @@ private:
             UndoSnapshot snapshot = std::move(activeDocument().redo.back());
             activeDocument().redo.pop_back();
             activeDocument().undo.push_back({snapshot.description, model().toXml()});
-            importDlgModelXml(model(), snapshot.xml);
+            model().importXml(snapshot.xml);
             refreshAll();
         } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
@@ -4108,6 +4129,11 @@ private:
             const bool jade = document.dialect() == DlgDialect::JadeEmpire;
             const DlgFlavor flavor = document.flavor();
 
+            const std::string ownerPath = (ref.kind == DlgNodeKind::Entry ? "EntryList\\" : "ReplyList\\") +
+                                          std::to_string(ref.index);
+            applyExistingInspectorField(document.node(ref), "PostProcNode", nodePostProc_, ownerPath);
+            applyExistingInspectorField(document.node(ref), "RecordVO", nodeRecordVo_, ownerPath);
+            applyExistingInspectorField(document.node(ref), "RecordNoVOOverride", nodeRecordNoVoOverride_, ownerPath);
             if (jade) return;
 
             setOptionalNodeField(document, ref, "Sound", FIELD_TYPE_RESREF, nodeSound_->GetValue(), false);
@@ -4202,6 +4228,14 @@ private:
         mutate("Edit dialogue link conditions", [this, ref]() {
             DlgDocument document = dialogue();
             const bool jade = document.dialect() == DlgDialect::JadeEmpire;
+            const std::string ownerPath = ref.owner == DlgLinkOwner::StartingList
+                ? "StartingList\\" + std::to_string(ref.position)
+                : (ref.owner == DlgLinkOwner::Entry ? "EntryList\\" : "ReplyList\\") +
+                  std::to_string(ref.ownerIndex) +
+                  (ref.owner == DlgLinkOwner::Entry ? "\\RepliesList\\" : "\\EntriesList\\") +
+                  std::to_string(ref.position);
+            applyExistingInspectorField(document.link(ref), "IsChild", linkIsChild_, ownerPath);
+            applyExistingInspectorField(document.link(ref), "LinkComment", linkComment_, ownerPath);
             setOptionalLinkField(document, ref, "Active", FIELD_TYPE_RESREF,
                                  linkActive1_->GetValue(), false);
 
@@ -4354,7 +4388,7 @@ private:
     void importFromPath(bool json, const std::filesystem::path& chosen) {
         mutate(json ? "Import JSON" : "Import XML", [this, chosen, json]() {
             const std::string source = readTextFile(chosen);
-            importDlgModelXml(model(), json ? gffJsonToXml(source) : source);
+            model().importXml(json ? gffJsonToXml(source) : source);
             activeDocument().selectedNode.reset();
             activeDocument().selectedLink.reset();
         });
@@ -4401,7 +4435,6 @@ private:
                                                   stem + (json ? ".json" : ".xml"));
         if (!chosen) return;
         try {
-            removeRetiredDlgFields(model());
             const std::string xml = model().toXml();
             checkOutput(*chosen, true);
             writeTextFile(*chosen, json ? gffXmlToJson(xml) : xml);
@@ -4412,7 +4445,7 @@ private:
         neodlg::patcher::DlgPatchMode patchMode,
         std::optional<std::filesystem::path> originalPath) {
         try {
-            removeRetiredDlgFields(model());
+            // Export must not mutate the document or invalidate inspector paths.
             const std::filesystem::path sourcePath = documentFilename(activeDocument());
             std::string defaultName = sourcePath.empty()
                 ? "modified.dlg"
@@ -4489,6 +4522,20 @@ private:
             }
 
             neotsl::throwIfUnsupported(project);
+
+            // The same explicit acknowledgement precedes both output modes.
+            // Do not silently imply that an incremental patch deletes fields.
+            if (!project.warnings.empty()) {
+                std::string warning;
+                for (const auto& message : project.warnings) {
+                    if (!warning.empty()) warning += "\n\n";
+                    warning += message;
+                }
+                if (!wxui::confirm(this, "Dynamic Merge Export", warning +
+                        "\n\nContinue exporting the supported edits?")) {
+                    return;
+                }
+            }
 
             if (!writeToIni) {
                 std::vector<std::string> companionFiles;
@@ -4622,8 +4669,7 @@ private:
 
     void refreshAll() {
         if (!hasActiveDocument()) return;
-        // Hosts can edit the underlying shared GffModel directly.
-        removeRetiredDlgFields(model());
+
         refreshHeader();
         updateTabTitle();
         refreshUndoMenu();
@@ -4998,10 +5044,15 @@ private:
                 !document.hasNodeField(ref, "Skippable") || document.nodeField(ref, "Skippable") != "0");
         }
 
+        loadExistingInspectorField(document.node(ref), "PostProcNode", nodePostProc_);
+        loadExistingInspectorField(document.node(ref), "RecordVO", nodeRecordVo_);
+        loadExistingInspectorField(document.node(ref), "RecordNoVOOverride", nodeRecordNoVoOverride_);
         const bool hasLink = activeDocument().selectedLink && document.link(*activeDocument().selectedLink);
         enableLinkInspector(hasLink);
         if (hasLink) {
             const DlgLinkRef linkRef = *activeDocument().selectedLink;
+            loadExistingInspectorField(document.link(linkRef), "IsChild", linkIsChild_);
+            loadExistingInspectorField(document.link(linkRef), "LinkComment", linkComment_);
             linkHeader_->SetLabel(wxui::toWx(
                 "Link to " + document.nodeKindName(ref.kind) + " " + std::to_string(ref.index)));
             loadField(linkActive1_, document.linkField(linkRef, "Active"));
@@ -5038,6 +5089,24 @@ private:
         refreshContextualInspector();
     }
 
+    void loadExistingInspectorField(const GffStruct* owner, const char* label, wxTextCtrl* control) {
+        const auto* field = existingInspectorField(owner, label);
+        control->ChangeValue(field ? wxui::toWx(field->GetString()) : wxString{});
+        control->DiscardEdits();
+    }
+
+    void applyExistingInspectorField(const GffStruct* owner, const char* label,
+                                     wxTextCtrl* control, const std::string& ownerPath) {
+        const auto* field = existingInspectorField(owner, label);
+        if (!field || !control->IsShown() || !control->IsModified()) return;
+        const auto value = wxui::toStd(control->GetValue());
+        if (value == field->GetString()) return;
+        // ChangeFieldValue preserves the original type and edits only the first
+        // occurrence. Duplicate/nested fields remain individually accessible in
+        // GFF Tree. An absent field is never created by a semantic Apply.
+        model().setValue(ownerPath + "\\" + field->GetLabel(), value);
+    }
+
     void loadField(wxTextCtrl* control, const std::string& value) {
         if (control) control->ChangeValue(wxui::toWx(value));
     }
@@ -5065,13 +5134,14 @@ private:
                 nodeCameraAngle_, nodeCameraId_, nodeCamHeightOffset_, nodeTarHeightOffset_, nodeCameraFovMode_, nodeCameraFov_,
                 nodeCameraAnimation_, nodeEmotion_, nodeFacialAnim_, nodeCamVidEffectPanel_, nodeFadeType_, nodeFadeColorPicker_,
                 nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodeAlienRace_,
-                nodeUnskippable_, animationList_, animationAddButton_,
+                nodeUnskippable_, nodePostProc_, nodeRecordVo_, nodeRecordNoVoOverride_,
+                animationList_, animationAddButton_,
                 animationEditButton_, animationDeleteButton_};
     }
 
     std::vector<wxWindow*> linkInspectorWindows() const {
         return {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkDesignerNumber_,
-                linkNot1_, linkNot2_, linkReverseCond_, linkDisplayInactive_, linkParamFields_};
+                linkNot1_, linkNot2_, linkReverseCond_, linkDisplayInactive_, linkParamFields_, linkIsChild_, linkComment_};
     }
 
     void clearInspectorControls() {
@@ -5088,7 +5158,8 @@ private:
                                     nodeScriptCamReplies_, nodeCameraReplies_, nodeQuest_, nodeQuestEntry_, nodePlotIndex_,
                                     nodePlotXp_, nodeActionStrA_, nodeActionStrB_, nodeSound_, nodeDelay_, nodeWaitFlags_, nodeCameraId_,
                                     nodeCamHeightOffset_, nodeTarHeightOffset_, nodeCameraFov_, nodeCameraAnimation_, nodeEmotion_, nodeFacialAnim_,
-                                    nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodeAlienRace_}) {
+                                    nodeFadeColorR_, nodeFadeColorG_, nodeFadeColorB_, nodeFadeDelay_, nodeFadeLength_, nodeAlienRace_,
+                                    nodePostProc_, nodeRecordVo_, nodeRecordNoVoOverride_}) {
             if (control) control->ChangeValue("");
         }
         if (nodeCameraAngle_) {
@@ -5128,7 +5199,8 @@ private:
     }
 
     void clearLinkControls() {
-        for (wxTextCtrl* control : {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkDesignerNumber_})
+        for (wxTextCtrl* control : {linkActive1_, linkActive2_, linkLogic_, linkParamStrA_, linkParamStrB_, linkDesignerNumber_,
+                                    linkIsChild_, linkComment_})
             if (control) control->ChangeValue("");
         for (wxCheckBox* check : {linkNot1_, linkNot2_, linkReverseCond_}) if (check) check->SetValue(false);
         if (linkParamFields_) linkParamFields_->ClearValues();
@@ -5499,6 +5571,14 @@ private:
         const auto windows = [](std::initializer_list<wxWindow*> fields, bool show) {
             for (auto* field : fields) if (field) field->Show(show);
         };
+        const auto present = [&](const GffStruct* owner, const char* label,
+                                 wxWindow* caption, wxTextCtrl* control) {
+            const auto* field = existingInspectorField(owner, label);
+            pair(caption, control, field != nullptr);
+            // Unusual structured field types remain visible but are edited in
+            // GFF Tree rather than being coerced into a scalar.
+            control->Enable(field && field->fieldtype <= FIELD_TYPE_RESREF);
+        };
         const auto hasText = [](const wxTextCtrl* field) {
             wxString text = field->GetValue();
             text.Trim(true).Trim(false);
@@ -5509,6 +5589,11 @@ private:
                            dialogue().semanticallyEditable() && activeDocument().selectedNode &&
                            dialogue().node(*activeDocument().selectedNode);
         if (!valid) {
+            present(nullptr, "PostProcNode", nodePostProcLabel_, nodePostProc_);
+            present(nullptr, "RecordVO", nodeRecordVoLabel_, nodeRecordVo_);
+            present(nullptr, "RecordNoVOOverride", nodeRecordNoVoOverrideLabel_, nodeRecordNoVoOverride_);
+            present(nullptr, "IsChild", linkIsChildLabel_, linkIsChild_);
+            present(nullptr, "LinkComment", linkCommentLabel_, linkComment_);
             for (std::size_t i = 1; i < inspectorSections_.size(); ++i)
                 inspectorSections_[i].singleHost->Hide();
             return;
@@ -5518,6 +5603,12 @@ private:
         const bool jade = document.dialect() == DlgDialect::JadeEmpire;
         // No synthetic K1/K2 restriction is applied to Jade's own schema.
         const bool k2 = !jade && inspectorFlavor_ == DlgFlavor::Kotor2;
+        present(document.node(ref), "PostProcNode", nodePostProcLabel_, nodePostProc_);
+        present(document.node(ref), "RecordVO", nodeRecordVoLabel_, nodeRecordVo_);
+        present(document.node(ref), "RecordNoVOOverride", nodeRecordNoVoOverrideLabel_, nodeRecordNoVoOverride_);
+        const bool existingPresentation = nodePostProc_->IsShown() || nodeRecordVo_->IsShown() ||
+                                          nodeRecordNoVoOverride_->IsShown();
+        if (presentationApplyButton_) presentationApplyButton_->Show(!jade || existingPresentation);
         if (!jade) {
             pair(nodeScript2Label_, nodeScript2_, k2 || hasText(nodeScript2_));
             const auto parameters = inspectorParameterVisibility(k2, true,
@@ -5548,7 +5639,7 @@ private:
         } else {
             // The existing Jade Entry/Reply rules are unchanged. Don't reserve
             // an entire unified section solely for the not-applicable note.
-            inspectorSections_[2].singleHost->Hide();
+            inspectorSections_[2].singleHost->Show(existingPresentation);
         }
 
         const auto link = activeDocument().selectedLink;
@@ -5557,11 +5648,14 @@ private:
             for (auto* field : linkInspectorWindows()) inspectorFieldWindow(field)->Hide();
             windows({linkActive1Label_, linkActive2Label_, linkLogicLabel_, linkParamStrALabel_,
                      linkParamStrBLabel_, linkDesignerNumberLabel_, linkNot1Placeholder_,
-                     linkNot2Placeholder_, linkReverseCondPlaceholder_, linkParamHeading_}, false);
+                     linkNot2Placeholder_, linkReverseCondPlaceholder_, linkParamHeading_,
+                     linkIsChildLabel_, linkCommentLabel_}, false);
             if (auto* button = FindWindow(ID_ApplyLink)) button->Hide();
             linkHeader_->SetLabel("Select an incoming link to edit its conditions.");
             return;
         }
+        present(document.link(*link), "IsChild", linkIsChildLabel_, linkIsChild_);
+        present(document.link(*link), "LinkComment", linkCommentLabel_, linkComment_);
         if (!jade) {
             pair(linkActive2Label_, linkActive2_, k2 || hasText(linkActive2_));
             pair(linkLogicLabel_, linkLogic_, k2 || hasText(linkLogic_));
@@ -5581,7 +5675,7 @@ private:
     }
 
     bool inspectorAllowsNodeWrite(const std::string& label) const {
-        if (isRemovedInspectorField(label)) return false;
+        if (isExistingOnlyInspectorField(label)) return false;
         const std::initializer_list<std::pair<const char*, wxWindow*>> fields{
             {"Script2", nodeScript2_}, {"ActionParamStrA", nodeActionStrA_}, {"ActionParamStrB", nodeActionStrB_},
             {"QuestEntry", nodeQuestEntry_}, {"Sound", nodeSound_}, {"CameraID", nodeCameraId_},
@@ -5599,7 +5693,7 @@ private:
     }
 
     bool inspectorAllowsLinkWrite(const std::string& label) const {
-        if (isRemovedInspectorField(label)) return false;
+        if (isExistingOnlyInspectorField(label)) return false;
         const std::initializer_list<std::pair<const char*, wxWindow*>> fields{
             {"Active2", linkActive2_}, {"ParamStrA", linkParamStrA_}, {"ParamStrB", linkParamStrB_},
             {"Logic", linkLogic_}, {"Not", linkNot1_}, {"Not2", linkNot2_}, {"DisplayInactive", linkDisplayInactive_}
@@ -5964,6 +6058,12 @@ private:
     wxTextCtrl* nodeFadeLength_ = nullptr;
     wxStaticText* nodeFadeLengthUnit_ = nullptr;
 
+    wxStaticText* nodePostProcLabel_ = nullptr;
+    wxTextCtrl* nodePostProc_ = nullptr;
+    wxStaticText* nodeRecordVoLabel_ = nullptr;
+    wxTextCtrl* nodeRecordVo_ = nullptr;
+    wxStaticText* nodeRecordNoVoOverrideLabel_ = nullptr;
+    wxTextCtrl* nodeRecordNoVoOverride_ = nullptr;
     wxStaticText* nodeAlienRaceLabel_ = nullptr;
     wxTextCtrl* nodeAlienRace_ = nullptr;
     wxStaticText* nodeUnskippablePlaceholder_ = nullptr;
@@ -5990,6 +6090,10 @@ private:
     wxCheckBox* linkNot2_ = nullptr;
     wxStaticText* linkReverseCondPlaceholder_ = nullptr;
     wxCheckBox* linkReverseCond_ = nullptr;
+    wxStaticText* linkIsChildLabel_ = nullptr;
+    wxTextCtrl* linkIsChild_ = nullptr;
+    wxStaticText* linkCommentLabel_ = nullptr;
+    wxTextCtrl* linkComment_ = nullptr;
     wxStaticText* linkParamHeading_ = nullptr;
     IntegerParameterFields* linkParamFields_ = nullptr;
 

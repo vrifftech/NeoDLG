@@ -13,7 +13,7 @@ namespace neodlg {
 // A read-only projection policy for NeoDLG's GFF tree, NOT a schema validator.
 // Paths and list indices stay untouched. Unknown fields/structures stay visible;
 // Optional fields are visible by default, even when empty or inactive. This
-// does not bypass game/dialect or link-direction rules, or restore deleted fields.
+// does not bypass game/dialect or link-direction rules.
 class DlgTreeFieldVisibility {
 public:
     explicit DlgTreeFieldVisibility(const DlgDocument& document, bool showOptional = true)
@@ -27,10 +27,6 @@ public:
             if (separator == std::string_view::npos) break;
             path.remove_prefix(separator + 1);
         }
-        // Check every component: children of a hidden struct/list or a localized
-        // field must not reappear at the root when search removes their parent.
-        for (const auto part : parts)
-            if (isRemovedInspectorField(fieldLabel(part))) return false;
         if (!document_.semanticallyEditable() || parts.size() < 3) return true;
 
         const auto index = parseIndex(parts[1]);
@@ -120,6 +116,7 @@ private:
     bool nodeVisible(DlgNodeRef ref, std::string_view label) const {
         const auto* node = document_.node(ref);
         if (!node) return true;
+        if (isExistingOnlyInspectorField(label)) return true;
         if (label == "Comment") return true; // Designer notes are retained in every dialect.
         const bool jade = document_.dialect() == DlgDialect::JadeEmpire;
         const bool jadeEntryField = oneOf(label, {"SpeakerIndex", "ListenerIndex", "VoiceOver", "Skippable",
@@ -153,6 +150,7 @@ private:
     bool linkVisible(DlgLinkRef ref, std::string_view label) const {
         const auto* link = document_.link(ref);
         if (!link) return true; // Do not hide unknown or malformed structures.
+        if (isExistingOnlyInspectorField(label)) return true;
         if (document_.dialect() == DlgDialect::JadeEmpire)
             return !isK2LinkInspectorField(label) && label != "DisplayInactive";
         if (label == "DesignerNumber" || label == "ReverseCond") return false;

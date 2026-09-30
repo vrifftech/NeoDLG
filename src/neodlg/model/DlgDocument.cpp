@@ -1,5 +1,4 @@
 #include "neodlg/model/DlgDocument.hpp"
-#include "neodlg/model/DlgFieldRemoval.hpp"
 
 #include <algorithm>
 #include <cctype>
@@ -575,8 +574,6 @@ void DlgDocument::setNodeField(DlgNodeRef ref,
                                const std::string& label,
                                std::uint32_t fieldType,
                                const std::string& value) {
-    if (isRetiredDlgField(label))
-        throw std::invalid_argument("This field has been removed from NeoDLG: " + label);
     GffStruct* structure = node(ref);
     if (!structure) throw std::out_of_range("Dialogue node does not exist.");
     setField(*structure, label, fieldType, value);
@@ -604,8 +601,6 @@ void DlgDocument::setLinkField(DlgLinkRef ref,
                                const std::string& label,
                                std::uint32_t fieldType,
                                const std::string& value) {
-    if (isRetiredDlgField(label))
-        throw std::invalid_argument("This field has been removed from NeoDLG: " + label);
     GffStruct* structure = link(ref);
     if (!structure) throw std::out_of_range("Dialogue link does not exist.");
     setField(*structure, label, fieldType, value);
@@ -632,8 +627,6 @@ std::string DlgDocument::rootField(const std::string& label) const {
 void DlgDocument::setRootField(const std::string& label,
                                std::uint32_t fieldType,
                                const std::string& value) {
-    if (isRetiredDlgField(label))
-        throw std::invalid_argument("This field has been removed from NeoDLG: " + label);
     GffStruct* structure = root();
     if (!structure) throw std::runtime_error("DLG root structure is unavailable.");
     setField(*structure, label, fieldType, value);
@@ -723,7 +716,6 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultNode(DlgNodeKind kind) const 
 }
 
 void DlgDocument::clearClonedNode(GffStruct& structure, DlgNodeKind kind) const {
-    removeRetiredDlgFields(structure);
     const bool jade = dialect() == DlgDialect::JadeEmpire || flavor() == DlgFlavor::JadeEmpire;
     clearList(structure, childListLabel(kind));
 
@@ -904,7 +896,6 @@ DlgNodeRef DlgDocument::duplicateNode(DlgNodeRef source) {
     auto* clonedStruct = dynamic_cast<GffStruct*>(clonedField.release());
     if (!clonedStruct) throw std::runtime_error("Unable to duplicate the dialogue node.");
     std::unique_ptr<GffStruct> clone(clonedStruct);
-    removeRetiredDlgFields(*clone);
     clone->typeid_ = static_cast<std::uint32_t>(list->count());
     assignFreshNodeId(*clone);
     const DlgNodeRef result{source.kind, list->count()};
@@ -945,7 +936,6 @@ void DlgDocument::copyLinkProperties(DlgLinkRef source, DlgLinkRef destination) 
     auto* clonedStruct = dynamic_cast<GffStruct*>(clonedField.release());
     if (!clonedStruct) throw std::runtime_error("Unable to duplicate dialogue link properties.");
     std::unique_ptr<GffStruct> clone(clonedStruct);
-    removeRetiredDlgFields(*clone);
     clone->typeid_ = static_cast<std::uint32_t>(destination.position);
     setField(*clone, "Index", FIELD_TYPE_DWORD, std::to_string(destinationIndex));
     destinationList->allStructs()[destination.position] = std::move(clone);

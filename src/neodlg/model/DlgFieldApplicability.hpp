@@ -1,7 +1,6 @@
 #pragma once
 
 #include "DlgDocument.hpp"
-#include "DlgFieldRemoval.hpp"
 
 #include <array>
 #include <optional>
@@ -35,10 +34,22 @@ inline bool isK2LinkInspectorField(std::string_view label) {
     return false;
 }
 
-inline bool isRemovedInspectorField(std::string_view label) {
-    // Defensive projection for raw/host-provided models before normalization.
-    // The document load/import/save boundaries now DELETE these fields too.
-    return isRetiredDlgField(label);
+// These authoring/legacy properties are preserved, but have no blank/default
+// inspector slots. Presence is per selected owner, not per file, and includes
+// zero and empty values. The full Override spelling is truncated by classic
+// GFF's 16-byte labels; raw tree paths use the actual stored spelling.
+inline bool isExistingOnlyInspectorField(std::string_view label) {
+    for (const auto name : {"LinkComment", "IsChild", "PostProcNode", "RecordVO",
+                            "RecordNoVOOverri", "RecordNoVOOverride"}) {
+        if (label == name) return true;
+    }
+    return false;
+}
+
+inline const GffField* existingInspectorField(const GffStruct* owner, std::string_view label) {
+    if (!owner || !isExistingOnlyInspectorField(label)) return nullptr;
+    if (label == "RecordNoVOOverride") label = "RecordNoVOOverri";
+    return owner->GetFieldByLabel(std::string(label));
 }
 
 inline bool hasK2LinkInspectorFields(const GffStruct* link) {
@@ -121,9 +132,6 @@ inline bool inspectorReplyChoiceLink(const DlgDocument& document,
 }
 
 // Compatibility with the first, Single Panel-only release of this policy.
-inline bool isRemovedSinglePanelField(std::string_view label) {
-    return isRemovedInspectorField(label);
-}
 inline DlgFlavor singlePanelFieldFlavor(const DlgDocument& document) {
     return inspectorFieldFlavor(document);
 }
