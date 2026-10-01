@@ -2067,41 +2067,19 @@ private:
         conversationWorkspacePage_->SetSizer(conversationWorkspaceSizer_);
         singlePanelWorkspacePage_->SetSizer(singlePanelWorkspaceSizer_);
 
+        // Each notebook page owns a permanent toolbar. The conversation tree
+        // and inspector are still shared, but the action controls are never
+        // dismantled or reparented during a workspace switch. This avoids the
+        // native notebook/sizer visibility state that could leave the entire
+        // Conversation toolbar hidden after returning from Single Panel.
+        conversationWorkspaceSizer_->Add(
+            buildSemanticToolbar(conversationWorkspacePage_, false), 0, wxEXPAND);
+        singlePanelWorkspaceSizer_->Add(
+            buildSemanticToolbar(singlePanelWorkspacePage_, true), 0, wxEXPAND);
+
         semanticWorkspace_ = new wxPanel(conversationWorkspacePage_);
         auto* page = semanticWorkspace_;
         auto* root = new wxBoxSizer(wxVERTICAL);
-
-        semanticToolbarSizer_ = new wxBoxSizer(wxVERTICAL);
-        const auto addToolbarButton = [&](int id, const wxString& label) {
-            semanticToolbarButtons_.push_back(new wxButton(page, id, label));
-        };
-        addToolbarButton(ID_AddStartingEntry, "Add Start Entry");
-        addToolbarButton(ID_AddChild, "Add Child");
-        addToolbarButton(ID_LinkExisting, "Link Existing...");
-        addToolbarButton(ID_DuplicateNode, "Duplicate");
-        addToolbarButton(ID_CopyNode, "Copy Node");
-        addToolbarButton(ID_PasteNode, "Paste as New");
-        addToolbarButton(ID_RemoveLink, "Remove Link");
-        addToolbarButton(ID_DeleteNode, "Delete Node");
-        addToolbarButton(ID_GoToIndex, "Go to Index...");
-        addToolbarButton(ID_ExpandAll, "Expand All");
-        addToolbarButton(ID_FoldAll, "Fold All");
-        FindWindow(ID_CopyNode)->SetToolTip("Copy this node's fields and animations, without outgoing links.");
-        FindWindow(ID_PasteNode)->SetToolTip("Paste an independent node: as a child of the opposite type, or as a sibling of the same type.");
-
-        findLabel_ = new wxStaticText(page, wxID_ANY, "Find:");
-        findText_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString,
-                                   wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
-        findText_->Bind(wxEVT_TEXT_ENTER, &NeoDLGPanelImpl::onFindNext, this);
-        findText_->Bind(wxEVT_TEXT, [this](wxCommandEvent& event) {
-            if (hasActiveDocument()) activeDocument().findTerm = wxui::toStd(findText_->GetValue());
-            event.Skip();
-        });
-        findText_->SetName("NeoDLG dialogue find");
-        findText_->SetMinSize(FromDIP(wxSize(160, -1)));
-        findNextButton_ = new wxButton(page, ID_FindNext, "Next");
-        rebuildSemanticToolbar(false);
-        root->Add(semanticToolbarSizer_, 0, wxEXPAND);
 
         auto* splitter = new wxSplitterWindow(page, wxID_ANY, wxDefaultPosition, wxDefaultSize,
                                                wxSP_LIVE_UPDATE | wxSP_3D);
@@ -2189,44 +2167,81 @@ private:
         });
     }
 
-    void rebuildSemanticToolbar(bool singlePanel) {
-        if (!semanticToolbarSizer_) return;
-
-        // Rebuild only the sizers: retain the same buttons, search text,
-        // selection, keyboard focus and event IDs across workspace switches.
-        semanticToolbarSizer_->Clear(false);
-        const auto sizeButton = [singlePanel](wxButton* button) {
-            const long style = button->GetWindowStyleFlag();
-            button->SetWindowStyleFlag(singlePanel
-                ? style | wxBU_EXACTFIT : style & ~wxBU_EXACTFIT);
-            button->InvalidateBestSize();
-        };
-        sizeButton(findNextButton_);
-
-        // Keep every control compact in one wrapping action bar. Find follows
-        // the node actions and wraps as one intact group when space is tight;
-        // no last item is expanded to fill the remainder of its row.
+    wxPanel* buildSemanticToolbar(wxWindow* parent, bool singlePanel) {
+        auto* panel = new wxPanel(parent);
+        auto* root = new wxBoxSizer(wxVERTICAL);
         auto* toolbar = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
-        for (auto* button : semanticToolbarButtons_) {
-            sizeButton(button);
+        const long buttonStyle = singlePanel ? wxBU_EXACTFIT : 0;
+        const auto addButton = [&](int id, const wxString& label,
+                                   const wxString& tooltip) {
+            auto* button = new wxButton(panel, id, label, wxDefaultPosition,
+                                        wxDefaultSize, buttonStyle);
+            if (!tooltip.empty()) button->SetToolTip(tooltip);
             toolbar->Add(button, 0, wxRIGHT | wxBOTTOM |
                 (singlePanel ? wxALIGN_CENTER_VERTICAL : 0), FromDIP(4));
-        }
+        };
 
+        addButton(ID_AddStartingEntry, "Add Start Entry", wxString{});
+        addButton(ID_AddChild, "Add Child", wxString{});
+        addButton(ID_LinkExisting, "Link Existing...", wxString{});
+        addButton(ID_DuplicateNode, "Duplicate", wxString{});
+        addButton(ID_CopyNode, "Copy Node",
+                  "Copy this node's fields and animations, without outgoing links.");
+        addButton(ID_PasteNode, "Paste as New",
+                  "Paste an independent node: as a child of the opposite type, or as a sibling of the same type.");
+        addButton(ID_RemoveLink, "Remove Link", wxString{});
+        addButton(ID_DeleteNode, "Delete Node", wxString{});
+        addButton(ID_GoToIndex, "Go to Index...", wxString{});
+        addButton(ID_ExpandAll, "Expand All", wxString{});
+        addButton(ID_FoldAll, "Fold All", wxString{});
+
+        // Make Find one indivisible wrap item so it remains beside the action
+        // buttons whenever space permits, without making it a full-width row.
+        auto* findGroup = new wxPanel(panel);
         auto* findRow = new wxBoxSizer(wxHORIZONTAL);
-        findRow->Add(findLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
-        findRow->Add(findText_, 1, wxEXPAND | wxRIGHT, FromDIP(4));
-        findRow->Add(findNextButton_, 0);
-        toolbar->Add(findRow, 0,
-            wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(4));
+        findRow->Add(new wxStaticText(findGroup, wxID_ANY, "Find:"), 0,
+                     wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
+        auto* findText = new wxTextCtrl(findGroup, wxID_ANY, wxEmptyString,
+                                        wxDefaultPosition, wxDefaultSize,
+                                        wxTE_PROCESS_ENTER);
+        findText->SetName(singlePanel
+            ? "NeoDLG single panel dialogue find"
+            : "NeoDLG dialogue find");
+        findText->SetMinSize(FromDIP(wxSize(160, -1)));
+        findText->Bind(wxEVT_TEXT_ENTER, &NeoDLGPanelImpl::onFindNext, this);
+        findText->Bind(wxEVT_TEXT, [this, findText](wxCommandEvent& event) {
+            const wxString value = findText->GetValue();
+            if (hasActiveDocument()) activeDocument().findTerm = wxui::toStd(value);
+            wxTextCtrl* const peer = findText == conversationFindText_
+                ? singlePanelFindText_
+                : conversationFindText_;
+            if (peer && peer->GetValue() != value) peer->ChangeValue(value);
+            event.Skip();
+        });
+        auto* findNext = new wxButton(findGroup, ID_FindNext, "Next",
+                                      wxDefaultPosition, wxDefaultSize,
+                                      buttonStyle);
+        findRow->Add(findText, 1, wxEXPAND | wxRIGHT, FromDIP(4));
+        findRow->Add(findNext, 0);
+        findGroup->SetSizer(findRow);
+        toolbar->Add(findGroup, 0,
+                     wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(4));
 
-        semanticToolbarSizer_->Add(toolbar, 0,
-            wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
-        for (auto* button : semanticToolbarButtons_) button->Show();
-        findLabel_->Show();
-        findText_->Show();
-        findNextButton_->Show();
-        semanticWorkspace_->InvalidateBestSize();
+        root->Add(toolbar, 0,
+                  wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
+        panel->SetSizer(root);
+        if (singlePanel) singlePanelFindText_ = findText;
+        else conversationFindText_ = findText;
+        return panel;
+    }
+
+    wxTextCtrl* activeSemanticFindText() const {
+        return singlePanelActive_ ? singlePanelFindText_ : conversationFindText_;
+    }
+
+    void setSemanticFindText(const wxString& value) {
+        if (conversationFindText_) conversationFindText_->ChangeValue(value);
+        if (singlePanelFindText_) singlePanelFindText_->ChangeValue(value);
     }
 
     void setSemanticWorkspaceHost(bool singlePanel) {
@@ -2916,9 +2931,8 @@ private:
         }
 
         singlePanelActive_ = singlePanel;
-        rebuildSemanticToolbar(singlePanel);
-        // Relayout the whole workspace, not only the inspector: the splitter
-        // must receive the wrapping toolbar height while keeping Find visible.
+        // The page-specific toolbars remain in place. Only the shared
+        // tree/inspector workspace and inspector sections change ownership.
         semanticWorkspace_->Layout();
         rebuildInspectorForms(singlePanel);
         inspectorBook_->Show(!singlePanel);
@@ -3507,7 +3521,7 @@ private:
         tab.lastSearchTerm.clear();
         tab.searchResults.clear();
         tab.searchIndex = 0;
-        if (findText_) findText_->ChangeValue(wxString{});
+        setSemanticFindText(wxString{});
     }
 
     void createDocumentTab(bool select) {
@@ -3585,7 +3599,7 @@ private:
         tabSwitchInProgress_ = false;
         activeDocumentIndex_ = index;
         if (rawFilter_) rawFilter_->ChangeValue(wxui::toWx(activeDocument().rawFilterTerm));
-        if (findText_) findText_->ChangeValue(wxui::toWx(activeDocument().findTerm));
+        setSemanticFindText(wxui::toWx(activeDocument().findTerm));
         setWorkspaceView(activeDocument().workspaceView, false);
         refreshAll();
     }
@@ -4282,7 +4296,9 @@ private:
 
     void onFocusFind(wxCommandEvent&) {
         if (!hasActiveDocument()) return;
-        auto* control = activeDocument().workspaceView == WorkspaceView::Raw ? rawFilter_ : findText_;
+        auto* control = activeDocument().workspaceView == WorkspaceView::Raw
+            ? rawFilter_
+            : activeSemanticFindText();
         if (control) { control->SetFocus(); control->SelectAll(); }
     }
 
@@ -4297,9 +4313,11 @@ private:
 
     void onFindNext(wxCommandEvent&) {
         if (!hasActiveDocument() || !dialogue().semanticallyEditable()) return;
+        wxTextCtrl* const findText = activeSemanticFindText();
+        if (!findText) return;
         auto& tab = activeDocument();
-        const std::string term = wxui::toStd(findText_->GetValue());
-        if (term.empty()) { findText_->SetFocus(); return; }
+        const std::string term = wxui::toStd(findText->GetValue());
+        if (term.empty()) { findText->SetFocus(); return; }
         // Recompute so edits, deletes, undo and tab switches cannot leave stale indexes.
         auto results = dialogue().search(term);
         if (term == tab.lastSearchTerm && results == tab.searchResults && !results.empty())
@@ -6391,10 +6409,8 @@ private:
     wxPanel* semanticWorkspace_ = nullptr;
     wxBoxSizer* conversationWorkspaceSizer_ = nullptr;
     wxBoxSizer* singlePanelWorkspaceSizer_ = nullptr;
-    wxBoxSizer* semanticToolbarSizer_ = nullptr;
-    std::vector<wxButton*> semanticToolbarButtons_;
-    wxStaticText* findLabel_ = nullptr;
-    wxButton* findNextButton_ = nullptr;
+    wxTextCtrl* conversationFindText_ = nullptr;
+    wxTextCtrl* singlePanelFindText_ = nullptr;
 
     wxTreeCtrl* conversationTree_ = nullptr;
     wxPanel* inspectorHost_ = nullptr;
@@ -6414,7 +6430,6 @@ private:
     wxScrolledWindow* wheelTarget_ = nullptr;
     int wheelRotation_ = 0;
     std::vector<ResizableInspectorText*> resizableInspectorText_;
-    wxTextCtrl* findText_ = nullptr;
     std::map<DlgNodeRef, wxTreeItemId> canonicalTreeItems_;
     std::unordered_map<std::string, wxTreeItemId> conversationTreeItemsByKey_;
     wxWindow* conversationTreeRenderedDocumentPage_ = nullptr;
