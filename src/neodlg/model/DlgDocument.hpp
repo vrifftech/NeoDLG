@@ -5,6 +5,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
@@ -58,6 +59,15 @@ struct DlgLinkRef {
     friend bool operator==(const DlgLinkRef& lhs, const DlgLinkRef& rhs) noexcept {
         return lhs.owner == rhs.owner && lhs.ownerIndex == rhs.ownerIndex && lhs.position == rhs.position;
     }
+};
+
+// An owned, single-node template. No pointers or graph links into the source
+// document survive copying; it is safe to paste after editing/closing the source.
+struct DlgNodeClipboard {
+    DlgFlavor flavor = DlgFlavor::Kotor;
+    DlgNodeKind kind = DlgNodeKind::Entry;
+    std::unique_ptr<GffStruct> contents;
+    std::vector<std::string> participantTags; // Jade TagList identities at copy time.
 };
 
 struct DlgTextValue {
@@ -165,6 +175,8 @@ public:
     DlgLinkRef linkExistingStartingEntry(DlgNodeRef entry);
     DlgLinkRef linkExistingChild(DlgNodeRef parent, DlgNodeRef child);
     DlgNodeRef duplicateNode(DlgNodeRef source);
+    DlgNodeClipboard copyNode(DlgNodeRef source) const;
+    DlgNodeRef pasteNode(const DlgNodeClipboard& clipboard);
     void removeLink(DlgLinkRef ref);
     void moveLink(DlgLinkRef ref, int delta);
     void copyLinkProperties(DlgLinkRef source, DlgLinkRef destination);
@@ -178,6 +190,9 @@ public:
     void replaceSpeakerTags(const std::vector<std::string>& values);
 
     std::vector<DlgNodeRef> search(const std::string& term) const;
+    // Collision-free graph shape, excluding scalar/inspector properties.
+    // Lets the UI update labels in place rather than rebuild an unchanged tree.
+    std::vector<std::size_t> topologySignature() const;
     std::vector<DlgNodeRef> unreachableNodes() const;
     std::vector<DlgIssue> validate() const;
     DlgStatistics statistics() const;

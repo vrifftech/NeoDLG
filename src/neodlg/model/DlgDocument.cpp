@@ -814,9 +814,27 @@ void DlgDocument::assignFreshNodeId(GffStruct& structure) {
     GffStruct* rootStruct = root();
     if (!rootStruct) return;
     auto* next = dynamic_cast<GffIntField*>(rootStruct->GetFieldByLabel("NextNodeID"));
-    if (!next) return;
-    setField(structure, "NodeID", FIELD_TYPE_INT, std::to_string(next->value));
-    ++next->value;
+    if (!next && !structure.GetFieldByLabel("NodeID")) return;
+    std::set<std::int32_t> used;
+    for (auto kind : {DlgNodeKind::Entry, DlgNodeKind::Reply}) {
+        const auto* list = nodeList(kind);
+        if (!list) continue;
+        for (const auto& node : list->allStructs()) {
+            if (!node) continue;
+            const auto* id = dynamic_cast<const GffIntField*>(node->GetFieldByLabel("NodeID"));
+            if (id && id->value >= 0) used.insert(id->value);
+        }
+    }
+    std::int32_t candidate = next ? std::max<std::int32_t>(0, next->value) : 0;
+    while (used.count(candidate)) {
+        if (candidate == std::numeric_limits<std::int32_t>::max()) candidate = 0;
+        else ++candidate;
+    }
+    setField(structure, "NodeID", FIELD_TYPE_INT, std::to_string(candidate));
+    // A stale NextNodeID must not create duplicate IDs, and INT_MAX must not
+    // overflow signed arithmetic. The next allocation checks the graph again.
+    setField(*rootStruct, "NextNodeID", FIELD_TYPE_INT, std::to_string(
+        candidate == std::numeric_limits<std::int32_t>::max() ? 0 : candidate + 1));
 }
 
 void DlgDocument::reindexList(GffList& list) const {
@@ -900,6 +918,69 @@ DlgNodeRef DlgDocument::duplicateNode(DlgNodeRef source) {
     assignFreshNodeId(*clone);
     const DlgNodeRef result{source.kind, list->count()};
     list->AddStruct(std::move(clone));
+    markDirty();
+    return result;
+}
+
+DlgNodeClipboard DlgDocument::copyNode(DlgNodeRef source) const {
+    const GffStruct* original = node(source);
+    if (!original) throw std::out_of_range("Dialogue node does not exist.");
+    auto field = original->Clone();
+    auto* structure = dynamic_cast<GffStruct*>(field.get());
+    if (!structure) throw std::runtime_error("Unable to copy the dialogue node.");
+    DlgNodeClipboard result;
+    result.flavor = flavor();
+    result.kind = source.kind;
+    if (dialect() == DlgDialect::JadeEmpire) result.participantTags = speakerTags();
+    field.release();
+    result.contents.reset(structure);
+    // A node template is not a branch clone. Numeric graph/participant indexes
+    // must never silently retarget objects in another document or after deletes.
+    if (auto* children = findList(*structure, childListLabel(source.kind)))
+        children->allStructs().clear();
+    return result;
+}
+
+DlgNodeRef DlgDocument::pasteNode(const DlgNodeClipboard& clipboard) {
+    if (!semanticallyEditable() || !clipboard.contents)
+        throw std::invalid_argument("The dialogue node clipboard is empty or this DLG is not editable.");
+    if (clipboard.flavor != flavor())
+        throw std::invalid_argument("Paste into a DLG for the same game as the copied node.");
+    GffList* list = nodeList(clipboard.kind);
+    if (!list) throw std::runtime_error("The DLG is missing the required node list.");
+    auto field = clipboard.contents->Clone();
+    auto* structure = dynamic_cast<GffStruct*>(field.get());
+    if (!structure) throw std::runtime_error("Unable to paste the dialogue node.");
+    field.release();
+    std::unique_ptr<GffStruct> copy(structure);
+    if (auto* children = findList(*copy, childListLabel(clipboard.kind)))
+        children->allStructs().clear();
+    if (dialect() == DlgDialect::JadeEmpire && clipboard.kind == DlgNodeKind::Entry) {
+        const auto destinationTags = speakerTags();
+        const auto remap = [&](GffStruct& owner, const char* label) {
+            auto* index = dynamic_cast<GffIntField*>(owner.GetFieldByLabel(label));
+            if (!index || index->value < 0 || index->value == std::numeric_limits<std::int32_t>::max()) return;
+            const auto sourceIndex = static_cast<std::size_t>(index->value);
+            if (sourceIndex >= clipboard.participantTags.size())
+                throw std::invalid_argument("The copied Jade node contains an invalid participant index.");
+            const auto tag = lowerAscii(clipboard.participantTags[sourceIndex]);
+            const auto found = std::find_if(destinationTags.begin(), destinationTags.end(),
+                [&](const std::string& candidate) { return lowerAscii(candidate) == tag; });
+            if (found == destinationTags.end())
+                throw std::invalid_argument("Add participant '" + tag + "' to the destination TagList before pasting.");
+            index->value = static_cast<std::int32_t>(std::distance(destinationTags.begin(), found));
+        };
+        remap(*copy, "SpeakerIndex");
+        remap(*copy, "ListenerIndex");
+        if (auto* animations = findList(*copy, "AnimationList")) {
+            for (auto& animation : animations->allStructs())
+                if (animation) remap(*animation, "Index");
+        }
+    }
+    copy->typeid_ = static_cast<std::uint32_t>(list->count());
+    assignFreshNodeId(*copy);
+    const DlgNodeRef result{clipboard.kind, list->count()};
+    list->AddStruct(std::move(copy));
     markDirty();
     return result;
 }
@@ -1219,6 +1300,26 @@ std::vector<DlgNodeRef> DlgDocument::search(const std::string& term) const {
             }
             if (lowerAscii(haystack).find(needle) != std::string::npos) result.push_back(ref);
         }
+    }
+    return result;
+}
+
+std::vector<std::size_t> DlgDocument::topologySignature() const {
+    std::vector<std::size_t> result{
+        static_cast<std::size_t>(model_.loaded()),
+        static_cast<std::size_t>(dialect()), nodeCount(DlgNodeKind::Entry),
+        nodeCount(DlgNodeKind::Reply)};
+    const auto append = [&](const std::vector<DlgLinkRef>& links) {
+        result.push_back(links.size());
+        for (const auto& linkRef : links) {
+            const auto target = targetOf(linkRef);
+            result.push_back(target ? target->index : std::numeric_limits<std::size_t>::max());
+        }
+    };
+    append(startingLinks());
+    for (auto kind : {DlgNodeKind::Entry, DlgNodeKind::Reply}) {
+        for (std::size_t index = 0; index < nodeCount(kind); ++index)
+            append(outgoingLinks({kind, index}));
     }
     return result;
 }

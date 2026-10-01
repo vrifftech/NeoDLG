@@ -10,6 +10,7 @@
 #include "neodlg/patcher/DlgPatcher.hpp"
 
 #include "NeoDlgDialogs.hpp"
+#include "DlgTreeViewState.hpp"
 
 #include "NeoDocumentTabs.hpp"
 #include "NeoGameDirectoryMenu.hpp"
@@ -443,13 +444,31 @@ public:
     }
 
     bool HasPendingOrNonzeroValue(std::size_t column) const {
+        // Visibility checks run after ordinary text events. They must not save,
+        // hide or disable the active wxGrid editor: doing so ends Conversation
+        // mode editing after the first character. An active editor is itself a
+        // pending value, so keep its column visible without committing it.
+        if (!singlePanel_ && grid_->IsCellEditControlEnabled() &&
+            grid_->GetGridCursorCol() == static_cast<int>(column)) {
+            return true;
+        }
         for (std::size_t row = 0; row < cells_.size(); ++row) {
             const auto* cell = cells_[row][column];
-            wxString value = GetCellValue(row, column);
+            wxString value = singlePanel_
+                ? cell->GetValue()
+                : grid_->GetCellValue(static_cast<int>(row), static_cast<int>(column));
             value.Trim(true).Trim(false);
             if (cell->IsModified() || gridEdited_[row][column] || (!value.empty() && value != "0")) return true;
         }
         return false;
+    }
+
+    bool ShouldQueueContextualRefresh(const wxCommandEvent& event) const {
+        // In Conversation mode, wxGrid's temporary text editor propagates a
+        // wxEVT_TEXT for every keystroke. Wait for our synthetic event from
+        // wxEVT_GRID_CELL_CHANGED instead; the edit is then complete. Single
+        // Panel uses the persistent text controls and can refresh immediately.
+        return singlePanel_ || event.GetEventObject() == this;
     }
 
     void SetAvailableWidth(int width) {
@@ -1466,6 +1485,7 @@ public:
     std::optional<DlgNodeRef> node;
     std::optional<DlgLinkRef> link;
     bool reference = false;
+    bool cycle = false;
     std::string key;
 };
 
@@ -1550,6 +1570,12 @@ enum : int {
     ID_AddChild,
     ID_LinkExisting,
     ID_DuplicateNode,
+    ID_CopyNode,
+    ID_PasteNode,
+    ID_Find,
+    ID_GoToIndex,
+    ID_ExpandAll,
+    ID_FoldAll,
     ID_RemoveLink,
     ID_DeleteNode,
     ID_MoveLinkUp,
@@ -1663,6 +1689,7 @@ public:
         document.selectedNode.reset(); document.selectedLink.reset();
         document.conversationTreeState.reset(); document.rawTreeState.reset();
         document.rawFilterTerm.clear();
+        resetDocumentFindState();
         conversationTreeRenderedDocumentPage_ = nullptr; rawTreeRenderedDocumentPage_ = nullptr;
         if (rawFilter_) rawFilter_->ChangeValue(wxString{});
         tryLoadCachedTlk();
@@ -1724,9 +1751,13 @@ private:
         WorkspaceView semanticView = WorkspaceView::Conversation;
         std::optional<DlgNodeRef> selectedNode;
         std::optional<DlgLinkRef> selectedLink;
-        neotree::TreeViewState conversationTreeState;
-        neotree::TreeViewState rawTreeState;
+        neodlggui::DlgTreeViewState conversationTreeState;
+        neodlggui::DlgTreeViewState rawTreeState;
         std::string rawFilterTerm;
+        std::string findTerm;
+        std::string lastSearchTerm;
+        std::vector<DlgNodeRef> searchResults;
+        std::size_t searchIndex = 0;
         std::vector<UndoSnapshot> undo;
         std::vector<UndoSnapshot> redo;
     };
@@ -1855,6 +1886,8 @@ private:
         edit->Append(ID_AddChild, "Add &Child Node\tInsert");
         edit->Append(ID_LinkExisting, "Link Existing Node...");
         edit->Append(ID_DuplicateNode, "&Duplicate Node");
+        edit->Append(ID_CopyNode, "Copy &Node\tCtrl-Shift-C");
+        edit->Append(ID_PasteNode, "Paste as Ne&w Node\tCtrl-Shift-V");
         edit->AppendSeparator();
         edit->Append(ID_RemoveLink, "Remove This &Link");
         edit->Append(ID_DeleteNode, "Delete Node &Everywhere");
@@ -1862,7 +1895,9 @@ private:
         edit->Append(ID_MoveLinkUp, "Move Choice &Up");
         edit->Append(ID_MoveLinkDown, "Move Choice &Down");
         edit->AppendSeparator();
+        edit->Append(ID_Find, "&Find...\tCtrl-F");
         edit->Append(ID_FindNext, "Find &Next\tF3");
+        edit->Append(ID_GoToIndex, "Go to Node &Index...\tCtrl-G");
 
         auto* dialogueMenu = new wxMenu;
         dialogueMenu->Append(ID_ConversationProperties, "Conversation &Properties...");
@@ -1883,6 +1918,9 @@ private:
         singlePanelViewItem_ = view->AppendRadioItem(ID_ViewSinglePanel, "Single Panel Editor");
         rawViewItem_ = view->AppendRadioItem(ID_ViewRaw, "GFF Structure Tree");
         conversationViewItem_->Check(true);
+        view->AppendSeparator();
+        view->Append(ID_ExpandAll, "Expand All Dialogue Nodes");
+        view->Append(ID_FoldAll, "Fold All Dialogue Nodes");
         view->AppendSeparator();
         if (!context_.embedded) {
         darkModeItem_ = view->AppendCheckItem(ID_DarkMode, "Dark Mode");
@@ -1925,6 +1963,19 @@ private:
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onAddChild, this, ID_AddChild);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onLinkExisting, this, ID_LinkExisting);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onDuplicateNode, this, ID_DuplicateNode);
+        Bind(wxEVT_MENU, &NeoDLGPanelImpl::onCopyNode, this, ID_CopyNode);
+        Bind(wxEVT_MENU, &NeoDLGPanelImpl::onPasteNode, this, ID_PasteNode);
+        Bind(wxEVT_MENU, &NeoDLGPanelImpl::onFocusFind, this, ID_Find);
+        Bind(wxEVT_MENU, &NeoDLGPanelImpl::onGoToIndex, this, ID_GoToIndex);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { expandDialogueTree(true); }, ID_ExpandAll);
+        Bind(wxEVT_MENU, [this](wxCommandEvent&) { expandDialogueTree(false); }, ID_FoldAll);
+        Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& event) {
+            event.Enable(hasActiveDocument() && dialogue().semanticallyEditable() &&
+                         activeDocument().selectedNode.has_value());
+        }, ID_CopyNode);
+        Bind(wxEVT_UPDATE_UI, [this](wxUpdateUIEvent& event) {
+            event.Enable(canPasteNode());
+        }, ID_PasteNode);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onRemoveLink, this, ID_RemoveLink);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onDeleteNode, this, ID_DeleteNode);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { moveSelectedLink(-1); }, ID_MoveLinkUp);
@@ -1976,6 +2027,11 @@ private:
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onAddChild, this, ID_AddChild);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onLinkExisting, this, ID_LinkExisting);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onDuplicateNode, this, ID_DuplicateNode);
+        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onCopyNode, this, ID_CopyNode);
+        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onPasteNode, this, ID_PasteNode);
+        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onGoToIndex, this, ID_GoToIndex);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { expandDialogueTree(true); }, ID_ExpandAll);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { expandDialogueTree(false); }, ID_FoldAll);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onRemoveLink, this, ID_RemoveLink);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onDeleteNode, this, ID_DeleteNode);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onFindNext, this, ID_FindNext);
@@ -1995,6 +2051,10 @@ private:
         Bind(wxEVT_TREE_ITEM_MENU, &NeoDLGPanelImpl::onTreeContextMenu, this, ID_ConversationTree);
         documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onDocumentTabChanged, this);
         documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, &NeoDLGPanelImpl::onDocumentTabCloseRequested, this);
+        workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, [this](wxBookCtrlEvent& event) {
+            if (event.GetEventObject() == workspaceBook_) captureRenderedTreeStates();
+            event.Skip();
+        }, ID_Workspace);
         workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onWorkspacePageChanged,
                              this, ID_Workspace);
     }
@@ -2019,11 +2079,24 @@ private:
         addToolbarButton(ID_AddChild, "Add Child");
         addToolbarButton(ID_LinkExisting, "Link Existing...");
         addToolbarButton(ID_DuplicateNode, "Duplicate");
+        addToolbarButton(ID_CopyNode, "Copy Node");
+        addToolbarButton(ID_PasteNode, "Paste as New");
         addToolbarButton(ID_RemoveLink, "Remove Link");
         addToolbarButton(ID_DeleteNode, "Delete Node");
+        addToolbarButton(ID_GoToIndex, "Go to Index...");
+        addToolbarButton(ID_ExpandAll, "Expand All");
+        addToolbarButton(ID_FoldAll, "Fold All");
+        FindWindow(ID_CopyNode)->SetToolTip("Copy this node's fields and animations, without outgoing links.");
+        FindWindow(ID_PasteNode)->SetToolTip("Paste an independent node: as a child of the opposite type, or as a sibling of the same type.");
 
         findLabel_ = new wxStaticText(page, wxID_ANY, "Find:");
-        findText_ = new wxTextCtrl(page, wxID_ANY);
+        findText_ = new wxTextCtrl(page, wxID_ANY, wxEmptyString,
+                                   wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+        findText_->Bind(wxEVT_TEXT_ENTER, &NeoDLGPanelImpl::onFindNext, this);
+        findText_->Bind(wxEVT_TEXT, [this](wxCommandEvent& event) {
+            if (hasActiveDocument()) activeDocument().findTerm = wxui::toStd(findText_->GetValue());
+            event.Skip();
+        });
         findText_->SetName("NeoDLG dialogue find");
         findText_->SetMinSize(FromDIP(wxSize(160, -1)));
         findNextButton_ = new wxButton(page, ID_FindNext, "Next");
@@ -2035,6 +2108,23 @@ private:
         conversationTree_ = new wxTreeCtrl(splitter, ID_ConversationTree, wxDefaultPosition, wxDefaultSize,
                                             wxTR_HAS_BUTTONS | wxTR_LINES_AT_ROOT | wxTR_SINGLE);
         conversationTree_->SetName("NeoDLG conversation tree");
+        conversationTree_->Bind(wxEVT_MOUSEWHEEL, [this](wxMouseEvent& event) {
+            cancelConversationViewportRestore(); event.Skip();
+        });
+        conversationTree_->Bind(wxEVT_LEFT_DOWN, [this](wxMouseEvent& event) {
+            cancelConversationViewportRestore(); event.Skip();
+        });
+        conversationTree_->Bind(wxEVT_KEY_DOWN, [this](wxKeyEvent& event) {
+            cancelConversationViewportRestore(); event.Skip();
+        });
+        for (const auto type : {wxEVT_SCROLLWIN_TOP, wxEVT_SCROLLWIN_BOTTOM,
+                               wxEVT_SCROLLWIN_LINEUP, wxEVT_SCROLLWIN_LINEDOWN,
+                               wxEVT_SCROLLWIN_PAGEUP, wxEVT_SCROLLWIN_PAGEDOWN,
+                               wxEVT_SCROLLWIN_THUMBTRACK, wxEVT_SCROLLWIN_THUMBRELEASE}) {
+            conversationTree_->Bind(type, [this](wxScrollWinEvent& event) {
+                cancelConversationViewportRestore(); event.Skip();
+            });
+        }
 
         inspectorHost_ = new wxPanel(splitter);
         auto* inspectorHostSizer = new wxBoxSizer(wxVERTICAL);
@@ -2086,9 +2176,10 @@ private:
             });
         }
         for (auto* parameters : {actionParamFields_, linkParamFields_}) {
-            parameters->Bind(wxEVT_TEXT, [this](wxCommandEvent& event) {
+            parameters->Bind(wxEVT_TEXT, [this, parameters](wxCommandEvent& event) {
                 event.Skip();
-                queueContextualInspectorRefresh();
+                if (parameters->ShouldQueueContextualRefresh(event))
+                    queueContextualInspectorRefresh();
             });
         }
         nodeFadeType_->Bind(wxEVT_CHOICE, [this](wxCommandEvent& event) {
@@ -2112,11 +2203,10 @@ private:
         };
         sizeButton(findNextButton_);
 
-        // wxWrapSizer normally stretches the last item on *each* line. With
-        // Delete Node last, that turns it into a wide destructive-action bar.
-        // In Single Panel no action may stretch, including after wrapping.
-        auto* toolbar = new wxWrapSizer(wxHORIZONTAL, singlePanel
-            ? wxREMOVE_LEADING_SPACES : wxWRAPSIZER_DEFAULT_FLAGS);
+        // Keep every control compact in one wrapping action bar. Find follows
+        // the node actions and wraps as one intact group when space is tight;
+        // no last item is expanded to fill the remainder of its row.
+        auto* toolbar = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
         for (auto* button : semanticToolbarButtons_) {
             sizeButton(button);
             toolbar->Add(button, 0, wxRIGHT | wxBOTTOM |
@@ -2127,21 +2217,15 @@ private:
         findRow->Add(findLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
         findRow->Add(findText_, 1, wxEXPAND | wxRIGHT, FromDIP(4));
         findRow->Add(findNextButton_, 0);
+        toolbar->Add(findRow, 0,
+            wxALIGN_CENTER_VERTICAL | wxRIGHT | wxBOTTOM, FromDIP(4));
 
-        if (singlePanel) {
-            // One intact group immediately to the right of the actions when
-            // it fits. On narrow windows the group wraps without clipping or
-            // stretching the preceding button. There is no reserved find row.
-            toolbar->Add(findRow, 0, wxALIGN_CENTER_VERTICAL | wxBOTTOM, FromDIP(4));
-        }
         semanticToolbarSizer_->Add(toolbar, 0,
             wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
-        if (!singlePanel) {
-            // Preserve Conversation's original toolbar, full-width search
-            // row and spacing. GFF Tree has a separate, untouched filter.
-            semanticToolbarSizer_->Add(findRow, 0,
-                wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(6));
-        }
+        for (auto* button : semanticToolbarButtons_) button->Show();
+        findLabel_->Show();
+        findText_->Show();
+        findNextButton_->Show();
         semanticWorkspace_->InvalidateBestSize();
     }
 
@@ -2834,7 +2918,7 @@ private:
         singlePanelActive_ = singlePanel;
         rebuildSemanticToolbar(singlePanel);
         // Relayout the whole workspace, not only the inspector: the splitter
-        // must receive the height released when the separate find row vanishes.
+        // must receive the wrapping toolbar height while keeping Find visible.
         semanticWorkspace_->Layout();
         rebuildInspectorForms(singlePanel);
         inspectorBook_->Show(!singlePanel);
@@ -3391,21 +3475,22 @@ private:
     }
 
     void captureRenderedConversationTreeState() {
-        if (!conversationTree_ || !hasActiveDocument() ||
+        if (!conversationTree_ || !hasActiveDocument() || treeRefreshInProgress_ ||
+            conversationViewportRestorePending_ || !conversationTree_->IsShownOnScreen() ||
             conversationTreeRenderedDocumentPage_ != activeDocument().tabPage) {
             return;
         }
-        neotree::captureTreeViewState(
+        neodlggui::captureDlgTreeState(
             *conversationTree_, activeDocument().conversationTreeState,
             [this](const wxTreeItemId& item) { return conversationTreeItemKey(item); });
     }
 
     void captureRenderedRawTreeState() {
-        if (!rawTree_ || !hasActiveDocument() ||
+        if (!rawTree_ || !hasActiveDocument() || !rawTree_->IsShownOnScreen() ||
             rawTreeRenderedDocumentPage_ != activeDocument().tabPage) {
             return;
         }
-        neotree::captureTreeViewState(
+        neodlggui::captureDlgTreeState(
             *rawTree_, activeDocument().rawTreeState,
             [this](const wxTreeItemId& item) { return rawTreeItemKey(item); });
     }
@@ -3415,8 +3500,19 @@ private:
         captureRenderedRawTreeState();
     }
 
+    void resetDocumentFindState() {
+        if (!hasActiveDocument()) return;
+        auto& tab = activeDocument();
+        tab.findTerm.clear();
+        tab.lastSearchTerm.clear();
+        tab.searchResults.clear();
+        tab.searchIndex = 0;
+        if (findText_) findText_->ChangeValue(wxString{});
+    }
+
     void createDocumentTab(bool select) {
         if (select && hasActiveDocument()) captureRenderedTreeStates();
+        if (select) cancelConversationViewportRestore();
         DocumentTab tab;
         const std::size_t previous = activeDocumentIndex_;
         documents_.push_back(std::move(tab));
@@ -3435,6 +3531,8 @@ private:
             tabSwitchInProgress_ = true;
             neotabs::changeSelectionToPage(documentTabs_, page);
             tabSwitchInProgress_ = false;
+            resetDocumentFindState();
+            if (rawFilter_) rawFilter_->ChangeValue(wxString{});
         }
     }
 
@@ -3481,11 +3579,13 @@ private:
     void selectDocumentTab(std::size_t index) {
         if (index >= documents_.size()) return;
         if (hasActiveDocument() && index != activeDocumentIndex_) captureRenderedTreeStates();
+        cancelConversationViewportRestore();
         tabSwitchInProgress_ = true;
         neotabs::changeSelectionToPage(documentTabs_, documents_[index].tabPage);
         tabSwitchInProgress_ = false;
         activeDocumentIndex_ = index;
         if (rawFilter_) rawFilter_->ChangeValue(wxui::toWx(activeDocument().rawFilterTerm));
+        if (findText_) findText_->ChangeValue(wxui::toWx(activeDocument().findTerm));
         setWorkspaceView(activeDocument().workspaceView, false);
         refreshAll();
     }
@@ -3503,6 +3603,8 @@ private:
 
     bool closeDocument(std::size_t index) {
         if (index >= documents_.size() || !confirmCloseDocument(index)) return false;
+        captureRenderedTreeStates();
+        cancelConversationViewportRestore();
         wxWindow* page = documents_[index].tabPage;
         if (conversationTreeRenderedDocumentPage_ == page) conversationTreeRenderedDocumentPage_ = nullptr;
         if (rawTreeRenderedDocumentPage_ == page) rawTreeRenderedDocumentPage_ = nullptr;
@@ -3511,6 +3613,8 @@ private:
         tabSwitchInProgress_ = false;
         if (!deleted) return false;
         documents_.erase(documents_.begin() + static_cast<std::ptrdiff_t>(index));
+        if (activeDocumentIndex_ == index) activeDocumentIndex_ = neotabs::npos;
+        else if (activeDocumentIndex_ != neotabs::npos && activeDocumentIndex_ > index) --activeDocumentIndex_;
         if (documents_.empty()) {
             activeDocumentIndex_ = neotabs::npos;
             createDocumentTab(true);
@@ -3552,6 +3656,7 @@ private:
             activeDocument().conversationTreeState.reset();
             activeDocument().rawTreeState.reset();
             activeDocument().rawFilterTerm.clear();
+            resetDocumentFindState();
             if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) conversationTreeRenderedDocumentPage_ = nullptr;
             if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) rawTreeRenderedDocumentPage_ = nullptr;
             if (rawFilter_) rawFilter_->ChangeValue(wxString{});
@@ -3615,6 +3720,7 @@ private:
         activeDocument().conversationTreeState.reset();
         activeDocument().rawTreeState.reset();
         activeDocument().rawFilterTerm.clear();
+        resetDocumentFindState();
         if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) conversationTreeRenderedDocumentPage_ = nullptr;
         if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) rawTreeRenderedDocumentPage_ = nullptr;
         if (rawFilter_) rawFilter_->ChangeValue(wxString{});
@@ -3878,6 +3984,9 @@ private:
     template <typename Function>
     bool mutate(const std::string& description, Function&& function) {
         if (!hasActiveDocument() || !model().loaded()) return false;
+        captureRenderedTreeStates();
+        const auto selectedNode = activeDocument().selectedNode;
+        const auto selectedLink = activeDocument().selectedLink;
         std::string snapshot;
         try {
             if (!model().gff().isGff4()) snapshot = model().toXml();
@@ -3892,6 +4001,8 @@ private:
                         // action can still recover from the on-disk file.
                     }
                 }
+                activeDocument().selectedNode = selectedNode;
+                activeDocument().selectedLink = selectedLink;
                 throw;
             }
             if (!snapshot.empty()) {
@@ -4023,6 +4134,55 @@ private:
         });
     }
 
+    bool canPasteNode() const {
+        if (!hasActiveDocument() || !dialogue().semanticallyEditable() ||
+            !nodeClipboard_ || !nodeClipboard_->contents ||
+            nodeClipboard_->flavor != dialogue().flavor()) return false;
+        return activeDocument().selectedNode.has_value() ||
+               nodeClipboard_->kind == DlgNodeKind::Entry;
+    }
+
+    void onCopyNode(wxCommandEvent&) {
+        if (!hasActiveDocument() || !activeDocument().selectedNode ||
+            !dialogue().semanticallyEditable()) return;
+        try {
+            nodeClipboard_ = dialogue().copyNode(*activeDocument().selectedNode);
+            setModuleStatusText("Node copied. Paste as New creates independent fields and animations, without outgoing links.");
+        } catch (const std::exception& ex) { wxui::showError(this, ex); }
+    }
+
+    void onPasteNode(wxCommandEvent&) {
+        if (!canPasteNode()) return;
+        const auto selectedNode = activeDocument().selectedNode;
+        const auto selectedLink = activeDocument().selectedLink;
+        mutate("Paste dialogue node as new", [this, selectedNode, selectedLink]() {
+            DlgDocument document = dialogue();
+            const DlgNodeRef copy = document.pasteNode(*nodeClipboard_);
+            std::optional<DlgLinkRef> added;
+            if (!selectedNode) {
+                added = document.linkExistingStartingEntry(copy);
+            } else if (selectedNode->kind != copy.kind) {
+                added = document.linkExistingChild(*selectedNode, copy);
+            } else if (selectedLink) {
+                if (selectedLink->owner == DlgLinkOwner::StartingList) {
+                    added = document.linkExistingStartingEntry(copy);
+                } else {
+                    const DlgNodeRef parent{
+                        selectedLink->owner == DlgLinkOwner::Entry ? DlgNodeKind::Entry : DlgNodeKind::Reply,
+                        selectedLink->ownerIndex};
+                    added = document.linkExistingChild(parent, copy);
+                }
+                while (added->position > selectedLink->position + 1) {
+                    document.moveLink(*added, -1);
+                    --added->position;
+                }
+            }
+            // With an unlinked same-kind selection, the copy is also unlinked.
+            activeDocument().selectedNode = copy;
+            activeDocument().selectedLink = added;
+        });
+    }
+
     void onDuplicateNode(wxCommandEvent&) {
         if (!activeDocument().selectedNode || !dialogue().semanticallyEditable()) return;
         const DlgNodeRef source = *activeDocument().selectedNode;
@@ -4120,23 +4280,41 @@ private:
         if (issue->node) selectSemanticNode(*issue->node, issue->link);
     }
 
+    void onFocusFind(wxCommandEvent&) {
+        if (!hasActiveDocument()) return;
+        auto* control = activeDocument().workspaceView == WorkspaceView::Raw ? rawFilter_ : findText_;
+        if (control) { control->SetFocus(); control->SelectAll(); }
+    }
+
+    void onGoToIndex(wxCommandEvent&) {
+        if (!hasActiveDocument() || !dialogue().semanticallyEditable()) return;
+        neodlggui::NodeIndexDialog dialog(this, dialogue(), activeDocument().selectedNode, darkMode_);
+        if (dialog.ShowModal() != wxID_OK) return;
+        showSemanticWorkspace();
+        selectSemanticNode(dialog.selectedNode(), std::nullopt);
+        conversationTree_->SetFocus();
+    }
+
     void onFindNext(wxCommandEvent&) {
-        if (!dialogue().semanticallyEditable()) return;
+        if (!hasActiveDocument() || !dialogue().semanticallyEditable()) return;
+        auto& tab = activeDocument();
         const std::string term = wxui::toStd(findText_->GetValue());
-        if (term.empty()) return;
-        if (term != lastSearchTerm_) {
-            lastSearchTerm_ = term;
-            searchResults_ = dialogue().search(term);
-            searchIndex_ = 0;
-        } else if (!searchResults_.empty()) {
-            searchIndex_ = (searchIndex_ + 1) % searchResults_.size();
-        }
-        if (searchResults_.empty()) {
+        if (term.empty()) { findText_->SetFocus(); return; }
+        // Recompute so edits, deletes, undo and tab switches cannot leave stale indexes.
+        auto results = dialogue().search(term);
+        if (term == tab.lastSearchTerm && results == tab.searchResults && !results.empty())
+            tab.searchIndex = (tab.searchIndex + 1) % results.size();
+        else
+            tab.searchIndex = 0;
+        tab.findTerm = tab.lastSearchTerm = term;
+        tab.searchResults = std::move(results);
+        if (tab.searchResults.empty()) {
             wxui::showMessage(this, "Find", "No dialogue nodes matched the search text.");
             return;
         }
-        selectSemanticNode(searchResults_[searchIndex_], std::nullopt);
-        setModuleStatusText(wxString::Format("Match %zu of %zu", searchIndex_ + 1, searchResults_.size()), 1);
+        showSemanticWorkspace();
+        selectSemanticNode(tab.searchResults[tab.searchIndex], std::nullopt);
+        setModuleStatusText(wxString::Format("Match %zu of %zu", tab.searchIndex + 1, tab.searchResults.size()), 1);
     }
 
     void onApplyNode(wxCommandEvent&) {
@@ -4745,6 +4923,8 @@ private:
 
     void setWorkspaceView(WorkspaceView view, bool refresh = true) {
         if (!workspaceBook_ || workspaceBook_->GetPageCount() < 3) return;
+        if (refresh) captureRenderedTreeStates();
+        cancelConversationViewportRestore();
 
         WorkspaceView semanticView = view;
         if (hasActiveDocument()) {
@@ -4774,8 +4954,9 @@ private:
         if (rawViewItem_) rawViewItem_->Check(view == WorkspaceView::Raw);
 
         if (refresh) {
-            if (view == WorkspaceView::Raw) refreshRawTree();
-            else refreshConversationTree();
+            // Capture happened before hiding/reparenting the outgoing view.
+            if (view == WorkspaceView::Raw) refreshRawTree(false);
+            else refreshConversationTree(false);
         }
     }
 
@@ -4856,12 +5037,113 @@ private:
         return found == conversationTreeItemsByKey_.end() ? wxTreeItemId{} : found->second;
     }
 
-    void refreshConversationTree() {
-        if (!conversationTree_ || !hasActiveDocument()) return;
-        if (conversationTreeRenderedDocumentPage_ == activeDocument().tabPage) {
-            captureRenderedConversationTreeState();
-        }
+    void cancelConversationViewportRestore() {
+        ++conversationViewportGeneration_;
+        conversationViewportRestorePending_ = false;
+    }
 
+    void restoreConversationViewport(const neodlggui::DlgTreeViewState& state) {
+        cancelConversationViewportRestore();
+        if (!conversationTree_->IsShownOnScreen() ||
+            !neodlggui::restoreDlgTreeViewport(*conversationTree_, state,
+                [this](const std::string& key) { return conversationTreeItemForKey(key); })) return;
+        const auto generation = conversationViewportGeneration_;
+        wxWindow* const documentPage = activeDocument().tabPage;
+        conversationViewportRestorePending_ = true;
+        wxWeakRef<NeoDLGPanelImpl> weakSelf(this);
+        // Inspector reflow is queued. Reapply once after the new geometry has
+        // settled, resolving keys afresh rather than retaining wxTreeItemIds.
+        CallAfter([weakSelf, state, generation, documentPage]() {
+            if (!weakSelf || weakSelf->IsBeingDeleted()) return;
+            auto* self = weakSelf.get();
+            if (self->conversationViewportGeneration_ != generation) return;
+            self->conversationViewportRestorePending_ = false;
+            if (!self->hasActiveDocument() || self->activeDocument().tabPage != documentPage ||
+                self->conversationTreeRenderedDocumentPage_ != documentPage ||
+                !self->conversationTree_->IsShownOnScreen()) return;
+            neodlggui::restoreDlgTreeViewport(*self->conversationTree_, state,
+                [self](const std::string& key) { return self->conversationTreeItemForKey(key); });
+        });
+    }
+
+    void showSemanticWorkspace() {
+        if (activeDocument().workspaceView == WorkspaceView::Raw)
+            setWorkspaceView(activeDocument().semanticView);
+    }
+
+    void expandDialogueTree(bool expand) {
+        if (!hasActiveDocument() || !dialogue().semanticallyEditable()) return;
+        showSemanticWorkspace();
+        cancelConversationViewportRestore();
+        // The materialized conversation tree terminates cycles/references;
+        // ExpandAll therefore cannot recurse around the dialogue graph.
+        if (expand) {
+            conversationTree_->ExpandAll();
+        } else {
+            // Keep only the two grouping levels open, so starting entries and
+            // the unreachable group remain discoverable after folding.
+            conversationTree_->CollapseAll();
+            conversationTree_->Expand(conversationTree_->GetRootItem());
+            const auto starts = conversationTreeItemForKey("conversation/starts");
+            if (starts.IsOk()) conversationTree_->Expand(starts);
+            conversationTree_->ScrollTo(conversationTree_->GetRootItem());
+        }
+        captureRenderedConversationTreeState();
+    }
+
+    bool selectedConversationOccurrenceMatches() const {
+        const auto item = conversationTree_->GetSelection();
+        if (!item.IsOk()) return !activeDocument().selectedNode && !activeDocument().selectedLink;
+        const auto* data = dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(item));
+        return data && data->node == activeDocument().selectedNode &&
+               data->link == activeDocument().selectedLink;
+    }
+
+    void synchronizeConversationSelection() {
+        if (selectedConversationOccurrenceMatches()) return;
+        if (activeDocument().selectedNode && dialogue().node(*activeDocument().selectedNode)) {
+            selectSemanticNode(*activeDocument().selectedNode, activeDocument().selectedLink, false);
+        } else {
+            activeDocument().selectedNode.reset();
+            activeDocument().selectedLink.reset();
+            conversationTree_->Unselect();
+        }
+    }
+
+    void refreshConversationLabels() {
+        const DlgDocument document = dialogue();
+        for (const auto& [key, item] : conversationTreeItemsByKey_) {
+            auto* data = dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(item));
+            if (!data || !data->node) continue;
+            const bool unreachable = key.rfind("conversation/unreachable/", 0) == 0;
+            std::string label = unreachable ? "[unreachable] " :
+                data->cycle ? "[cycle] " : data->reference ? "[link] " : "";
+            label += document.nodeLabel(*data->node);
+            if (data->link) {
+                const auto condition = linkConditionSummary(document, *data->link);
+                if (!condition.empty()) label += "  (" + condition + ")";
+            }
+            const auto text = wxui::toWx(label);
+            if (conversationTree_->GetItemText(item) != text) conversationTree_->SetItemText(item, text);
+            styleTreeNode(item, *data->node, unreachable);
+        }
+    }
+
+    void refreshConversationTree(bool capture = true) {
+        if (!conversationTree_ || !hasActiveDocument()) return;
+        const bool sameDocument = conversationTreeRenderedDocumentPage_ == activeDocument().tabPage;
+        if (capture && sameDocument) captureRenderedConversationTreeState();
+        const auto topology = dialogue().topologySignature();
+        if (sameDocument && topology == renderedConversationTopology_) {
+            // Applying Line/Scripts/Presentation/Conditions/Animations changes
+            // labels, not tree topology. Keep native items, expansion and pixel
+            // scroll positions intact rather than delete/recreate every row.
+            refreshConversationLabels();
+            synchronizeConversationSelection();
+            if (!capture) restoreConversationViewport(activeDocument().conversationTreeState);
+            return;
+        }
+        cancelConversationViewportRestore();
         treeRefreshInProgress_ = true;
         conversationTree_->Freeze();
         conversationTree_->DeleteAllItems();
@@ -4894,7 +5176,7 @@ private:
                 conversationTreeItemsByKey_[kStartsKey] = starts;
                 std::vector<DlgNodeRef> ancestry;
                 for (DlgLinkRef ref : document.startingLinks()) {
-                    appendLinkBranch(starts, ref, ancestry, 0);
+                    appendLinkBranch(starts, ref, ancestry);
                 }
 
                 const auto unreachable = document.unreachableNodes();
@@ -4918,71 +5200,89 @@ private:
                         ancestry.clear();
                         ancestry.push_back(ref);
                         for (DlgLinkRef child : document.outgoingLinks(ref)) {
-                            appendLinkBranch(item, child, ancestry, 1);
+                            appendLinkBranch(item, child, ancestry);
                         }
                     }
                 }
             }
         }
 
-        const neotree::TreeViewState& state = activeDocument().conversationTreeState;
-        neotree::TreeRestoreResult restored;
+        const auto state = activeDocument().conversationTreeState;
         if (state.initialized) {
-            restored = neotree::restoreTreeViewState(
-                *conversationTree_, state,
-                [this](const std::string& key) { return conversationTreeItemForKey(key); });
+            for (const auto& key : state.expandedKeys) {
+                const auto item = conversationTreeItemForKey(key);
+                if (item.IsOk()) conversationTree_->Expand(item);
+            }
         } else {
             conversationTree_->Expand(rootItem);
             if (starts.IsOk()) conversationTree_->Expand(starts);
         }
 
         conversationTreeRenderedDocumentPage_ = activeDocument().tabPage;
+        renderedConversationTopology_ = topology;
         conversationTree_->Thaw();
-        treeRefreshInProgress_ = false;
-
-        if (!restored.selectionRestored && activeDocument().selectedNode) {
-            selectSemanticNode(*activeDocument().selectedNode, activeDocument().selectedLink, false);
+        if (state.initialized && !state.selectedKey.empty()) {
+            const auto item = conversationTreeItemForKey(state.selectedKey);
+            if (item.IsOk()) conversationTree_->SelectItem(item);
         }
+        // An Add/Paste/Duplicate may intentionally select a different node.
+        // Never let restoration of the old occurrence override that choice.
+        const bool selectionUnchanged = selectedConversationOccurrenceMatches();
+        synchronizeConversationSelection();
+        treeRefreshInProgress_ = false;
+        if (selectionUnchanged) restoreConversationViewport(state);
     }
 
     void appendLinkBranch(const wxTreeItemId& parent,
                           DlgLinkRef linkRef,
-                          std::vector<DlgNodeRef>& ancestry,
-                          int depth) {
+                          const std::vector<DlgNodeRef>& ancestry) {
+        // Iterative depth-first traversal: do not silently truncate long DLGs
+        // at 512 levels. Each canonical node is traversed once; links/cycles
+        // are displayed as terminal references, making Expand All finite.
+        struct Branch {
+            wxTreeItemId parent;
+            DlgLinkRef link;
+            std::optional<DlgNodeRef> leave;
+        };
+        std::vector<Branch> pending{{parent, linkRef, std::nullopt}};
+        std::set<DlgNodeRef> ancestors(ancestry.begin(), ancestry.end());
         DlgDocument document = dialogue();
-        const auto target = document.targetOf(linkRef);
-        if (!target) {
-            const std::string itemKey = conversationLinkKey(linkRef);
-            const wxTreeItemId invalid = conversationTree_->AppendItem(
-                parent, "[invalid link]", -1, -1,
-                new ConversationTreeData(ConversationTreeKind::InvalidLink, std::nullopt,
-                                         linkRef, false, itemKey));
-            conversationTreeItemsByKey_[itemKey] = invalid;
-            conversationTree_->SetItemTextColour(invalid, darkMode_ ? wxColour(255, 130, 130) : wxColour(170, 0, 0));
-            return;
+        while (!pending.empty()) {
+            const Branch branch = pending.back();
+            pending.pop_back();
+            if (branch.leave) { ancestors.erase(*branch.leave); continue; }
+            const auto target = document.targetOf(branch.link);
+            const std::string itemKey = conversationLinkKey(branch.link);
+            if (!target) {
+                const wxTreeItemId invalid = conversationTree_->AppendItem(
+                    branch.parent, "[invalid link]", -1, -1,
+                    new ConversationTreeData(ConversationTreeKind::InvalidLink, std::nullopt,
+                                             branch.link, false, itemKey));
+                conversationTreeItemsByKey_[itemKey] = invalid;
+                conversationTree_->SetItemTextColour(invalid,
+                    darkMode_ ? wxColour(255, 130, 130) : wxColour(170, 0, 0));
+                continue;
+            }
+            const bool cycle = ancestors.count(*target) != 0;
+            const bool reference = canonicalTreeItems_.count(*target) != 0;
+            std::string label = cycle ? "[cycle] " : reference ? "[link] " : "";
+            label += document.nodeLabel(*target);
+            const auto condition = linkConditionSummary(document, branch.link);
+            if (!condition.empty()) label += "  (" + condition + ")";
+            auto* data = new ConversationTreeData(ConversationTreeKind::Node, *target,
+                                                  branch.link, cycle || reference, itemKey);
+            data->cycle = cycle;
+            const auto item = conversationTree_->AppendItem(branch.parent, wxui::toWx(label), -1, -1, data);
+            conversationTreeItemsByKey_[itemKey] = item;
+            styleTreeNode(item, *target, false);
+            if (cycle || reference) continue;
+            canonicalTreeItems_[*target] = item;
+            ancestors.insert(*target);
+            pending.push_back({{}, {}, *target});
+            const auto children = document.outgoingLinks(*target);
+            for (auto child = children.rbegin(); child != children.rend(); ++child)
+                pending.push_back({item, *child, std::nullopt});
         }
-
-        const bool cycle = std::find(ancestry.begin(), ancestry.end(), *target) != ancestry.end();
-        const bool reference = canonicalTreeItems_.count(*target) != 0;
-        std::string label;
-        if (cycle) label = "[cycle] ";
-        else if (reference) label = "[link] ";
-        label += document.nodeLabel(*target);
-        const std::string condition = linkConditionSummary(document, linkRef);
-        if (!condition.empty()) label += "  (" + condition + ")";
-
-        const std::string itemKey = conversationLinkKey(linkRef);
-        const wxTreeItemId item = conversationTree_->AppendItem(
-            parent, wxui::toWx(label), -1, -1,
-            new ConversationTreeData(ConversationTreeKind::Node, *target, linkRef,
-                                     cycle || reference, itemKey));
-        conversationTreeItemsByKey_[itemKey] = item;
-        styleTreeNode(item, *target, false);
-        if (cycle || reference || depth >= 512) return;
-        canonicalTreeItems_[*target] = item;
-        ancestry.push_back(*target);
-        for (DlgLinkRef child : document.outgoingLinks(*target)) appendLinkBranch(item, child, ancestry, depth + 1);
-        ancestry.pop_back();
     }
 
     void styleTreeNode(const wxTreeItemId& item, DlgNodeRef node, bool unreachable) {
@@ -5031,24 +5331,55 @@ private:
             moveUp->Enable(activeDocument().selectedLink.has_value());
             moveDown->Enable(activeDocument().selectedLink.has_value());
         }
+        menu.AppendSeparator();
+        menu.Append(ID_CopyNode, "Copy Node")->Enable(activeDocument().selectedNode.has_value());
+        menu.Append(ID_PasteNode, "Paste as New Node")->Enable(canPasteNode());
+        menu.AppendSeparator();
+        menu.Append(ID_GoToIndex, "Go to Node Index...");
+        menu.Append(ID_ExpandAll, "Expand All");
+        menu.Append(ID_FoldAll, "Fold All");
         PopupMenu(&menu);
     }
 
     void selectSemanticNode(DlgNodeRef node,
                             std::optional<DlgLinkRef> link,
                             bool updateInspector = true) {
+        cancelConversationViewportRestore();
+        wxTreeItemId item;
+        if (link) {
+            const auto candidate = conversationTreeItemForKey(conversationLinkKey(*link));
+            const auto* data = candidate.IsOk()
+                ? dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(candidate)) : nullptr;
+            if (data && data->node == node) item = candidate;
+        }
+        if (!item.IsOk()) {
+            const auto found = canonicalTreeItems_.find(node);
+            if (found != canonicalTreeItems_.end()) item = found->second;
+        }
         activeDocument().selectedNode = node;
         activeDocument().selectedLink = link;
-        auto found = canonicalTreeItems_.find(node);
-        if (found != canonicalTreeItems_.end() && found->second.IsOk()) {
-            conversationTree_->SelectItem(found->second);
-            conversationTree_->EnsureVisible(found->second);
+        if (item.IsOk()) {
+            const bool wasRefreshing = treeRefreshInProgress_;
+            treeRefreshInProgress_ = true;
+            conversationTree_->SelectItem(item);
+            conversationTree_->EnsureVisible(item);
+            treeRefreshInProgress_ = wasRefreshing;
+            const auto* data = dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(item));
+            if (data) activeDocument().selectedLink = data->link;
         }
         if (updateInspector) refreshInspector();
     }
 
     void onTreeSelection(wxTreeEvent& event) {
-        if (treeRefreshInProgress_) { event.Skip(); return; }
+        if (treeRefreshInProgress_ || !hasActiveDocument()) { event.Skip(); return; }
+        cancelConversationViewportRestore();
+        if (!event.GetItem().IsOk()) {
+            activeDocument().selectedNode.reset();
+            activeDocument().selectedLink.reset();
+            refreshInspector();
+            event.Skip();
+            return;
+        }
         auto* data = dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(event.GetItem()));
         if (!data) { event.Skip(); return; }
         activeDocument().selectedNode = data->node;
@@ -5058,8 +5389,9 @@ private:
     }
 
     void onTreeActivated(wxTreeEvent& event) {
+        if (!hasActiveDocument() || !event.GetItem().IsOk()) { event.Skip(); return; }
         auto* data = dynamic_cast<ConversationTreeData*>(conversationTree_->GetItemData(event.GetItem()));
-        if (data && data->reference && data->node) selectSemanticNode(*data->node, data->link);
+        if (data && data->reference && data->node) selectSemanticNode(*data->node, std::nullopt);
         event.Skip();
     }
 
@@ -5572,65 +5904,74 @@ private:
         return created == rawTreeItemsByPath_.end() ? wxTreeItemId{} : created->second;
     }
 
-    void refreshRawTree() {
+    void refreshRawTree(bool capture = true) {
         if (!rawTree_ || !hasActiveDocument()) return;
-        if (rawTreeRenderedDocumentPage_ == activeDocument().tabPage) {
+        if (capture && rawTreeRenderedDocumentPage_ == activeDocument().tabPage) {
             captureRenderedRawTreeState();
         }
 
-        wxWindowUpdateLocker updateLocker(rawTree_);
-        rawRows_.clear();
-        rawTreeChildrenByParent_.clear();
-        rawTreeMaterializedPaths_.clear();
-        rawTreeItemsByPath_.clear();
-        rawTree_->DeleteAllItems();
+        const auto state = activeDocument().rawTreeState;
+        {
+            wxWindowUpdateLocker updateLocker(rawTree_);
+            rawRows_.clear();
+            rawTreeChildrenByParent_.clear();
+            rawTreeMaterializedPaths_.clear();
+            rawTreeItemsByPath_.clear();
+            rawTree_->DeleteAllItems();
 
-        const std::string filter = lowerAscii(activeDocument().rawFilterTerm);
-        if (model().loaded()) {
-            const auto document = dialogue();
-            const DlgTreeFieldVisibility visibility(document);
-            for (const auto& row : model().rows()) {
-                // Filter the display projection only. Keep original GFF paths,
-                // list indices and model data; never renumber or delete fields.
-                if (!visibility.visible(row.path)) continue;
-                if (!filter.empty()) {
-                    const std::string haystack = lowerAscii(
-                        row.path + " " + row.label + " " + row.type + " " + row.value + " " + row.resolved);
-                    if (haystack.find(filter) == std::string::npos) continue;
+            const std::string filter = lowerAscii(activeDocument().rawFilterTerm);
+            if (model().loaded()) {
+                const auto document = dialogue();
+                const DlgTreeFieldVisibility visibility(document);
+                for (const auto& row : model().rows()) {
+                    // Filter the display projection only. Keep original GFF paths,
+                    // list indices and model data; never renumber or delete fields.
+                    if (!visibility.visible(row.path)) continue;
+                    if (!filter.empty()) {
+                        const std::string haystack = lowerAscii(
+                            row.path + " " + row.label + " " + row.type + " " + row.value + " " + row.resolved);
+                        if (haystack.find(filter) == std::string::npos) continue;
+                    }
+                    rawRows_.push_back(row);
                 }
-                rawRows_.push_back(row);
             }
-        }
 
-        const std::string rootLabel = !model().loaded()
-            ? std::string("No DLG loaded")
-            : (documentFilename(activeDocument()).empty()
-                   ? std::string("New DLG")
-                   : neosettings::pathToUtf8(documentFilename(activeDocument())));
-        const wxTreeItemId root = rawTree_->AddRoot(
-            wxui::toWx(rootLabel), -1, -1, new RawGffTreeItemData(std::string{}, -1));
-        rawTreeRowItems_.assign(rawRows_.size(), wxTreeItemId{});
+            const std::string rootLabel = !model().loaded()
+                ? std::string("No DLG loaded")
+                : (documentFilename(activeDocument()).empty()
+                       ? std::string("New DLG")
+                       : neosettings::pathToUtf8(documentFilename(activeDocument())));
+            const wxTreeItemId root = rawTree_->AddRoot(
+                wxui::toWx(rootLabel), -1, -1, new RawGffTreeItemData(std::string{}, -1));
+            rawTreeRowItems_.assign(rawRows_.size(), wxTreeItemId{});
 
-        std::unordered_map<std::string, std::size_t> visibleRows;
-        visibleRows.reserve(rawRows_.size());
-        for (std::size_t i = 0; i < rawRows_.size(); ++i) visibleRows.emplace(rawRows_[i].path, i);
-        for (std::size_t i = 0; i < rawRows_.size(); ++i) {
-            std::string parentPath = gffTreeParentPath(rawRows_[i].path);
-            while (!parentPath.empty() && visibleRows.find(parentPath) == visibleRows.end()) {
-                parentPath = gffTreeParentPath(parentPath);
+            std::unordered_map<std::string, std::size_t> visibleRows;
+            visibleRows.reserve(rawRows_.size());
+            for (std::size_t i = 0; i < rawRows_.size(); ++i) visibleRows.emplace(rawRows_[i].path, i);
+            for (std::size_t i = 0; i < rawRows_.size(); ++i) {
+                std::string parentPath = gffTreeParentPath(rawRows_[i].path);
+                while (!parentPath.empty() && visibleRows.find(parentPath) == visibleRows.end()) {
+                    parentPath = gffTreeParentPath(parentPath);
+                }
+                rawTreeChildrenByParent_[parentPath].push_back(i);
             }
-            rawTreeChildrenByParent_[parentPath].push_back(i);
-        }
 
-        materializeRawTreeChildren(root, std::string{});
-        const neotree::TreeViewState& state = activeDocument().rawTreeState;
-        if (state.initialized) {
-            neotree::restoreTreeViewState(
-                *rawTree_, state,
-                [this](const std::string& key) { return ensureRawTreeItemForKey(key); });
-        } else {
-            rawTree_->Expand(root);
+            materializeRawTreeChildren(root, std::string{});
+            if (state.initialized) {
+                for (const auto& key : state.expandedKeys) {
+                    const auto item = ensureRawTreeItemForKey(key);
+                    if (item.IsOk()) rawTree_->Expand(item);
+                }
+            } else {
+                rawTree_->Expand(root);
+            }
+        } // Thaw before restoring the selected row and viewport.
+        if (state.initialized && !state.selectedKey.empty()) {
+            const auto item = ensureRawTreeItemForKey(state.selectedKey);
+            if (item.IsOk()) rawTree_->SelectItem(item);
         }
+        neodlggui::restoreDlgTreeViewport(*rawTree_, state,
+            [this](const std::string& key) { return ensureRawTreeItemForKey(key); });
         rawTreeRenderedDocumentPage_ = activeDocument().tabPage;
     }
 
@@ -6077,9 +6418,10 @@ private:
     std::map<DlgNodeRef, wxTreeItemId> canonicalTreeItems_;
     std::unordered_map<std::string, wxTreeItemId> conversationTreeItemsByKey_;
     wxWindow* conversationTreeRenderedDocumentPage_ = nullptr;
-    std::string lastSearchTerm_;
-    std::vector<DlgNodeRef> searchResults_;
-    std::size_t searchIndex_ = 0;
+    std::optional<DlgNodeClipboard> nodeClipboard_;
+    std::vector<std::size_t> renderedConversationTopology_;
+    std::size_t conversationViewportGeneration_ = 0;
+    bool conversationViewportRestorePending_ = false;
 
     wxStaticText* nodeHeader_ = nullptr;
     wxTextCtrl* conversationNodeHeader_ = nullptr;

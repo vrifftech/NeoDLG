@@ -6,6 +6,7 @@
 #include "NeoWxUi.hpp"
 
 #include <wx/listctrl.h>
+#include <wx/choice.h>
 #include <wx/radiobut.h>
 #include <wx/srchctrl.h>
 #include <wx/statline.h>
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <limits>
 #include <optional>
 #include <string>
 #include <utility>
@@ -22,6 +24,79 @@
 namespace neodlggui {
 
 using neodlg::DlgNodeRef;
+
+class NodeIndexDialog final : public wxDialog {
+public:
+    NodeIndexDialog(wxWindow* parent, const neodlg::DlgDocument& document,
+                    std::optional<DlgNodeRef> current, bool darkMode)
+        : wxDialog(parent, wxID_ANY, "Go to Node Index", wxDefaultPosition, wxDefaultSize,
+                   wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
+          entries_(document.nodeCount(neodlg::DlgNodeKind::Entry)),
+          replies_(document.nodeCount(neodlg::DlgNodeKind::Reply)) {
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        root->Add(new wxStaticText(this, wxID_ANY,
+            "Choose the node list and its zero-based index (not NodeID or StrRef)."),
+            0, wxALL, FromDIP(12));
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        kind_ = new wxChoice(this, wxID_ANY);
+        kind_->Append("Entry");
+        kind_->Append("Reply");
+        kind_->SetSelection(current && current->kind == neodlg::DlgNodeKind::Reply ? 1 : 0);
+        index_ = new wxTextCtrl(this, wxID_ANY,
+            current ? wxString::Format("%zu", current->index) : wxString("0"),
+            wxDefaultPosition, wxDefaultSize, wxTE_PROCESS_ENTER);
+        index_->SetName("NeoDLG node index");
+        row->Add(kind_, 0, wxRIGHT, FromDIP(8));
+        row->Add(index_, 1);
+        root->Add(row, 0, wxEXPAND | wxLEFT | wxRIGHT, FromDIP(12));
+        range_ = new wxStaticText(this, wxID_ANY, wxEmptyString);
+        root->Add(range_, 0, wxEXPAND | wxALL, FromDIP(12));
+        root->Add(CreateButtonSizer(wxOK | wxCANCEL), 0, wxEXPAND | wxALL, FromDIP(12));
+        SetSizerAndFit(root);
+        SetMinSize(GetSize());
+        auto* go = wxDynamicCast(FindWindow(wxID_OK), wxButton);
+        if (go) go->SetLabel("Go");
+        kind_->Bind(wxEVT_CHOICE, [this](wxCommandEvent&) { updateRange(); });
+        index_->Bind(wxEVT_TEXT_ENTER, [this](wxCommandEvent&) { accept(); });
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { accept(); }, wxID_OK);
+        updateRange();
+        wxui::applyTheme(this, darkMode);
+        CentreOnParent();
+        index_->SetFocus();
+        index_->SelectAll();
+    }
+
+    DlgNodeRef selectedNode() const { return selected_; }
+
+private:
+    std::size_t count() const { return kind_->GetSelection() == 0 ? entries_ : replies_; }
+    void updateRange() {
+        range_->SetLabel(count() ? wxString::Format("Valid index: 0 to %zu", count() - 1)
+                                : wxString("This node list is empty."));
+        if (auto* go = FindWindow(wxID_OK)) go->Enable(count() != 0);
+        Layout();
+    }
+    void accept() {
+        wxString text = index_->GetValue();
+        text.Trim(true).Trim(false);
+        unsigned long long value = 0;
+        bool digits = !text.empty();
+        for (const auto ch : text) if (ch < '0' || ch > '9') digits = false;
+        if (!digits || !text.ToULongLong(&value) ||
+            value > std::numeric_limits<std::size_t>::max() || value >= count()) {
+            wxui::showMessage(this, "Go to Node Index", "Enter an index in the displayed range.");
+            index_->SetFocus(); index_->SelectAll(); return;
+        }
+        selected_ = {kind_->GetSelection() == 0 ? neodlg::DlgNodeKind::Entry : neodlg::DlgNodeKind::Reply,
+                     static_cast<std::size_t>(value)};
+        EndModal(wxID_OK);
+    }
+    std::size_t entries_ = 0, replies_ = 0;
+    wxChoice* kind_ = nullptr;
+    wxTextCtrl* index_ = nullptr;
+    wxStaticText* range_ = nullptr;
+    DlgNodeRef selected_;
+};
 
 class PatcherExportModeDialog final : public wxDialog {
 public:
