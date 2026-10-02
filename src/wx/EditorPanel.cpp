@@ -1677,6 +1677,8 @@ public:
         auto& document = activeDocument();
         document.model = std::move(candidate);
         document.savedContents = std::move(savedContents);
+        document.tlkManuallySelected = false;
+        document.resolvedGame.reset();
         document.logicalFilename.clear();
         document.resourceIdentity = std::move(input.identity);
         document.sourceDescription = std::move(input.sourceDescription);
@@ -1742,6 +1744,8 @@ private:
         std::vector<std::filesystem::path> protectedInputs;
         std::string untitledName = "Untitled DLG";
         std::string tlkAutoLoadWarning;
+        bool tlkManuallySelected = false;
+        std::optional<neogames::GameId> resolvedGame;
         wxWindow* tabPage = nullptr;
         bool saveInProgress = false;
 #if defined(__EMSCRIPTEN__)
@@ -1773,6 +1777,7 @@ private:
     struct DialogueSummary {
         wxString file;
         wxString type;
+        wxString game;
         wxString statistics;
         wxString tlk;
         wxString warning;
@@ -1788,6 +1793,15 @@ private:
     const GffModel& model() const { return *activeDocument().model; }
     DlgDocument dialogue() { return DlgDocument(model()); }
     DlgDocument dialogue() const { return DlgDocument(model()); }
+
+    DlgFlavor effectiveDialogueFlavor(const DlgDocument& document) const {
+        if (document.dialect() == DlgDialect::JadeEmpire) return DlgFlavor::JadeEmpire;
+        if (hasActiveDocument() && activeDocument().resolvedGame == neogames::GameId::Kotor2)
+            return DlgFlavor::Kotor2;
+        if (hasActiveDocument() && activeDocument().resolvedGame == neogames::GameId::Kotor1)
+            return DlgFlavor::Kotor;
+        return document.flavor();
+    }
 
     std::filesystem::path documentFilename(const DocumentTab& tab) const {
         if (!tab.logicalFilename.empty()) return tab.logicalFilename;
@@ -1813,6 +1827,7 @@ private:
         if (!hasActiveDocument() || !model().loaded()) {
             summary.file = "No DLG loaded";
             summary.type = "None";
+            summary.game = "Unknown";
             summary.statistics = "No conversation data";
             summary.tlk = "none";
             return summary;
@@ -1831,6 +1846,18 @@ private:
         summary.type = wxui::toWx(trimHeader(model().fileType()) + " " +
                                   trimHeader(model().version()) + " - " +
                                   dialectName(document.dialect()));
+        switch (effectiveDialogueFlavor(document)) {
+        case DlgFlavor::Kotor:
+            summary.game = activeDocument().resolvedGame
+                ? "Knights of the Old Republic" : "KotOR / TSL compatible (not yet resolved)";
+            break;
+        case DlgFlavor::Kotor2:
+            summary.game = "Knights of the Old Republic II";
+            break;
+        case DlgFlavor::JadeEmpire:
+            summary.game = "Jade Empire";
+            break;
+        }
         if (document.semanticallyEditable()) {
             const DlgStatistics stats = document.statistics();
             summary.statistics = wxui::toWx(
@@ -3659,6 +3686,8 @@ private:
             document.create(flavor);
             activeDocument().savedContents.reset(); // A new, unsaved DLG is still modified.
             activeDocument().logicalFilename.clear();
+            activeDocument().tlkManuallySelected = false;
+            activeDocument().resolvedGame.reset();
 #if defined(__EMSCRIPTEN__)
             activeDocument().sourceImport.reset();
 #endif
@@ -3720,6 +3749,8 @@ private:
         ensureTabForOpen();
         activeDocument().model = std::move(candidate);
         activeDocument().savedContents = std::move(savedContents);
+        activeDocument().tlkManuallySelected = false;
+        activeDocument().resolvedGame.reset();
         activeDocument().logicalFilename = path;
         activeDocument().resourceIdentity.clear();
         activeDocument().sourceDescription.clear();
@@ -3799,6 +3830,7 @@ private:
 
         addValue("File:", summary.file, true);
         addValue("Format:", summary.type, false);
+        addValue("Game:", summary.game, false);
         addValue("Contents:", summary.statistics, false);
         addValue("TLK:", summary.tlk, true);
         if (!summary.warning.empty()) addValue("TLK warning:", summary.warning, true);
@@ -3913,13 +3945,38 @@ private:
         }
     }
 
+    neogames::ResourceGameContext dialogueGameContext() const {
+        neogames::ResourceGameContext context;
+        const DlgFlavor flavor = dialogue().flavor();
+        if (flavor == DlgFlavor::JadeEmpire) {
+            context.definitiveGame = neogames::GameId::JadeEmpire;
+        } else if (flavor == DlgFlavor::Kotor2) {
+            context.definitiveGame = neogames::GameId::Kotor2;
+        } else {
+            // A marker-free DLG is structurally compatible with both games.
+            // Its containing installation or the selected active game is the
+            // only reliable discriminator.
+            context.compatibleGames = {neogames::GameId::Kotor1, neogames::GameId::Kotor2};
+        }
+        return context;
+    }
+
     void tryLoadResolvedTlkForPath(const std::filesystem::path& path) {
-        if (model().tlk().loaded()) return;
-        const auto resolved = neogames::resolver().bestTlkForPath(path);
-        if (!resolved || resolved->empty()) return;
+        if (activeDocument().tlkManuallySelected) return;
+        const auto resolution = neogames::resolver().resolveContext(path, dialogueGameContext());
+        activeDocument().resolvedGame = resolution.game;
+        if (resolution.tlkPath.empty()) {
+            if (resolution.ambiguous) activeDocument().tlkAutoLoadWarning = resolution.diagnostic;
+            return;
+        }
+        if (model().tlk().loaded() &&
+            neosettings::samePathForMru(model().tlk().filename(), resolution.tlkPath)) {
+            activeDocument().tlkAutoLoadWarning.clear();
+            return;
+        }
         try {
-            model().loadTlk(*resolved);
-            settings_.setLastTlkPath(*resolved);
+            model().loadTlk(resolution.tlkPath);
+            settings_.setLastTlkPath(resolution.tlkPath);
             activeDocument().tlkAutoLoadWarning.clear();
         } catch (const std::exception& ex) {
             activeDocument().tlkAutoLoadWarning = ex.what();
@@ -3934,8 +3991,12 @@ private:
 #else
         const auto path = settings_.lastTlkPath();
         if (!path || path->empty()) return;
-        try { model().loadTlk(*path); }
-        catch (const std::exception&) { settings_.clearLastTlkPath(); }
+        try {
+            model().loadTlk(*path);
+            activeDocument().tlkManuallySelected = false;
+        } catch (const std::exception&) {
+            settings_.clearLastTlkPath();
+        }
 #endif
     }
 
@@ -3945,6 +4006,8 @@ private:
             if (rememberPath) settings_.setLastTlkPath(chosen);
             else settings_.clearLastTlkPath();
             activeDocument().tlkAutoLoadWarning.clear();
+            activeDocument().tlkManuallySelected = true;
+            activeDocument().resolvedGame.reset();
             refreshAll();
             return true;
         } catch (const std::exception& ex) {
@@ -3983,6 +4046,8 @@ private:
         if (!hasActiveDocument()) return;
         model().clearTlk();
         settings_.clearLastTlkPath();
+        activeDocument().tlkManuallySelected = true;
+        activeDocument().resolvedGame.reset();
         refreshAll();
     }
 
@@ -4459,7 +4524,7 @@ private:
         mutate("Edit dialogue presentation", [this, ref]() {
             DlgDocument document = dialogue();
             const bool jade = document.dialect() == DlgDialect::JadeEmpire;
-            const DlgFlavor flavor = document.flavor();
+            const DlgFlavor flavor = effectiveDialogueFlavor(document);
 
             const std::string ownerPath = (ref.kind == DlgNodeKind::Entry ? "EntryList\\" : "ReplyList\\") +
                                           std::to_string(ref.index);
@@ -5515,7 +5580,7 @@ private:
             loadField(nodeCameraAnimation_, document.nodeField(ref, "CameraAnimation"));
             loadField(nodeEmotion_, document.nodeField(ref, "Emotion"));
             loadField(nodeFacialAnim_, document.nodeField(ref, "FacialAnim"));
-            populateVideoEffect(document.flavor(), document.nodeField(ref, "CamVidEffect"),
+            populateVideoEffect(effectiveDialogueFlavor(document), document.nodeField(ref, "CamVidEffect"),
                                 document.hasNodeField(ref, "CamVidEffect"));
             populateIntegerChoice(nodeFadeType_, nodeFadeTypeValues_, kFadeTypeOptions,
                                   document.nodeField(ref, "FadeType"), 0,
@@ -6046,7 +6111,12 @@ private:
         const bool loaded = hasActiveDocument() && model().loaded();
         const auto kind = loaded && activeDocument().selectedNode
             ? activeDocument().selectedNode->kind : DlgNodeKind::Entry;
-        updateDialectFieldVisibility(loaded ? dialogue().flavor() : DlgFlavor::Kotor, kind);
+        if (loaded) {
+            const auto document = dialogue();
+            updateDialectFieldVisibility(effectiveDialogueFlavor(document), kind);
+        } else {
+            updateDialectFieldVisibility(DlgFlavor::Kotor, kind);
+        }
         if (loaded && activeDocument().selectedNode && dialogue().dialect() != DlgDialect::JadeEmpire)
             updateCameraControls();
     }
