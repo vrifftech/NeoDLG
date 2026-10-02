@@ -629,6 +629,37 @@ private:
     bool singlePanel_ = false;
 };
 
+// wxWrapSizer needs the final notebook-page width before it can report its
+// height. Keep a real, permanent toolbar window for each workspace page and
+// forward that width through the panel boundary. The controls retain their
+// values and native enabled state while inactive pages are hidden by wxNotebook.
+class SemanticToolbarPanel final : public wxPanel {
+public:
+    explicit SemanticToolbarPanel(wxWindow* parent) : wxPanel(parent, wxID_ANY) {}
+
+    bool InformFirstDirection(int direction, int size, int availableOtherDir) override {
+        if (direction != wxHORIZONTAL || size <= 0 || !GetSizer()) {
+            return wxPanel::InformFirstDirection(direction, size, availableOtherDir);
+        }
+        const int clientWidth = std::max(1, size - GetWindowBorderSize().x);
+        const bool changed = GetSizer()->InformFirstDirection(
+            direction, clientWidth, availableOtherDir);
+        InvalidateBestSize();
+        return changed;
+    }
+
+    void EnsureControlsShown() {
+        for (auto* child : GetChildren()) child->Show(true);
+        if (auto* sizer = GetSizer()) {
+            const int clientWidth = GetClientSize().x;
+            if (clientWidth > 0)
+                sizer->InformFirstDirection(wxHORIZONTAL, clientWidth, -1);
+        }
+        InvalidateBestSize();
+        Layout();
+    }
+};
+
 // A real multiline text control with a small, separate resize grip. Do not put
 // children on a native wxTextCtrl: that is not portable between GTK/MSW/Cocoa.
 // Only the height is user-sized; the field width follows the inspector.
@@ -1637,6 +1668,7 @@ public:
         tryLoadCachedTlk();
         applyDarkMode();
         refreshAll();
+        queueSemanticToolbarLayout();
     }
 
 
@@ -2084,6 +2116,10 @@ private:
         }, ID_Workspace);
         workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onWorkspacePageChanged,
                              this, ID_Workspace);
+        workspaceBook_->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+            event.Skip();
+            queueSemanticToolbarLayout();
+        });
     }
 
     void buildConversationPage(wxNotebook* parent) {
@@ -2096,16 +2132,26 @@ private:
 
         // Each notebook page owns a permanent toolbar. The conversation tree
         // and inspector are still shared, but the action controls are never
-        // dismantled or reparented during a workspace switch. This avoids the
-        // native notebook/sizer visibility state that could leave the entire
-        // Conversation toolbar hidden after returning from Single Panel. Keep
-        // the wrapping toolbar as a child sizer: a wrapper panel can cache the
-        // tall best height calculated before wxNotebook has its final width,
-        // starving the shared tree/inspector until the first page switch.
-        conversationWorkspaceSizer_->Add(
-            buildSemanticToolbar(conversationWorkspacePage_, false), 0, wxEXPAND);
-        singlePanelWorkspaceSizer_->Add(
-            buildSemanticToolbar(singlePanelWorkspacePage_, true), 0, wxEXPAND);
+        // dismantled, recreated or reparented during a workspace switch. The
+        // width-aware toolbar panel prevents both stale oversized best heights
+        // and the zero-height initial layout seen before the first page switch.
+        conversationToolbar_ = buildSemanticToolbar(conversationWorkspacePage_, false);
+        singlePanelToolbar_ = buildSemanticToolbar(singlePanelWorkspacePage_, true);
+        conversationWorkspaceSizer_->Add(conversationToolbar_, 0, wxEXPAND);
+        singlePanelWorkspaceSizer_->Add(singlePanelToolbar_, 0, wxEXPAND);
+
+        const auto bindWorkspacePageLayout = [this](wxPanel* page) {
+            page->Bind(wxEVT_SHOW, [this](wxShowEvent& event) {
+                event.Skip();
+                if (event.IsShown()) queueSemanticToolbarLayout();
+            });
+            page->Bind(wxEVT_SIZE, [this](wxSizeEvent& event) {
+                event.Skip();
+                queueSemanticToolbarLayout();
+            });
+        };
+        bindWorkspacePageLayout(conversationWorkspacePage_);
+        bindWorkspacePageLayout(singlePanelWorkspacePage_);
 
         semanticWorkspace_ = new wxPanel(conversationWorkspacePage_);
         auto* page = semanticWorkspace_;
@@ -2197,13 +2243,14 @@ private:
         });
     }
 
-    wxBoxSizer* buildSemanticToolbar(wxWindow* parent, bool singlePanel) {
+    SemanticToolbarPanel* buildSemanticToolbar(wxWindow* parent, bool singlePanel) {
+        auto* panel = new SemanticToolbarPanel(parent);
         auto* root = new wxBoxSizer(wxVERTICAL);
         auto* toolbar = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
         const long buttonStyle = singlePanel ? wxBU_EXACTFIT : 0;
         const auto addButton = [&](int id, const wxString& label,
                                    const wxString& tooltip) {
-            auto* button = new wxButton(parent, id, label, wxDefaultPosition,
+            auto* button = new wxButton(panel, id, label, wxDefaultPosition,
                                         wxDefaultSize, buttonStyle);
             if (!tooltip.empty()) button->SetToolTip(tooltip);
             toolbar->Add(button, 0, wxRIGHT | wxBOTTOM |
@@ -2226,7 +2273,7 @@ private:
 
         // Make Find one indivisible wrap item so it remains beside the action
         // buttons whenever space permits, without making it a full-width row.
-        auto* findGroup = new wxPanel(parent);
+        auto* findGroup = new wxPanel(panel);
         auto* findRow = new wxBoxSizer(wxHORIZONTAL);
         findRow->Add(new wxStaticText(findGroup, wxID_ANY, "Find:"), 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
@@ -2258,9 +2305,35 @@ private:
 
         root->Add(toolbar, 0,
                   wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
+        panel->SetSizer(root);
         if (singlePanel) singlePanelFindText_ = findText;
         else conversationFindText_ = findText;
-        return root;
+        return panel;
+    }
+
+    void refreshSemanticToolbarLayouts() {
+        if (!workspaceBook_) return;
+        wxWindowUpdateLocker updateLocker(workspaceBook_);
+        if (conversationToolbar_) conversationToolbar_->EnsureControlsShown();
+        if (singlePanelToolbar_) singlePanelToolbar_->EnsureControlsShown();
+        if (conversationWorkspacePage_) {
+            conversationWorkspacePage_->InvalidateBestSize();
+            conversationWorkspacePage_->Layout();
+        }
+        if (singlePanelWorkspacePage_) {
+            singlePanelWorkspacePage_->InvalidateBestSize();
+            singlePanelWorkspacePage_->Layout();
+        }
+        workspaceBook_->Layout();
+    }
+
+    void queueSemanticToolbarLayout() {
+        if (semanticToolbarLayoutPending_) return;
+        semanticToolbarLayoutPending_ = true;
+        CallAfter([this]() {
+            semanticToolbarLayoutPending_ = false;
+            if (!IsBeingDeleted()) refreshSemanticToolbarLayouts();
+        });
     }
 
     wxTextCtrl* activeSemanticFindText() const {
@@ -5042,6 +5115,7 @@ private:
             if (view == WorkspaceView::Raw) refreshRawTree(false);
             else refreshConversationTree(false);
         }
+        queueSemanticToolbarLayout();
     }
 
     void onWorkspacePageChanged(wxBookCtrlEvent& event) {
@@ -6439,6 +6513,7 @@ private:
         neoview::applyFontScale(this, fontScale_);
         refreshInspectorLayouts();
         Layout();
+        queueSemanticToolbarLayout();
     }
 
     void changeFontScaleSteps(int steps) {
@@ -6480,8 +6555,11 @@ private:
     wxPanel* semanticWorkspace_ = nullptr;
     wxBoxSizer* conversationWorkspaceSizer_ = nullptr;
     wxBoxSizer* singlePanelWorkspaceSizer_ = nullptr;
+    SemanticToolbarPanel* conversationToolbar_ = nullptr;
+    SemanticToolbarPanel* singlePanelToolbar_ = nullptr;
     wxTextCtrl* conversationFindText_ = nullptr;
     wxTextCtrl* singlePanelFindText_ = nullptr;
+    bool semanticToolbarLayoutPending_ = false;
 
     wxTreeCtrl* conversationTree_ = nullptr;
     wxPanel* inspectorHost_ = nullptr;
