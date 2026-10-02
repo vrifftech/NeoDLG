@@ -2098,7 +2098,10 @@ private:
         // and inspector are still shared, but the action controls are never
         // dismantled or reparented during a workspace switch. This avoids the
         // native notebook/sizer visibility state that could leave the entire
-        // Conversation toolbar hidden after returning from Single Panel.
+        // Conversation toolbar hidden after returning from Single Panel. Keep
+        // the wrapping toolbar as a child sizer: a wrapper panel can cache the
+        // tall best height calculated before wxNotebook has its final width,
+        // starving the shared tree/inspector until the first page switch.
         conversationWorkspaceSizer_->Add(
             buildSemanticToolbar(conversationWorkspacePage_, false), 0, wxEXPAND);
         singlePanelWorkspaceSizer_->Add(
@@ -2194,14 +2197,13 @@ private:
         });
     }
 
-    wxPanel* buildSemanticToolbar(wxWindow* parent, bool singlePanel) {
-        auto* panel = new wxPanel(parent);
+    wxBoxSizer* buildSemanticToolbar(wxWindow* parent, bool singlePanel) {
         auto* root = new wxBoxSizer(wxVERTICAL);
         auto* toolbar = new wxWrapSizer(wxHORIZONTAL, wxREMOVE_LEADING_SPACES);
         const long buttonStyle = singlePanel ? wxBU_EXACTFIT : 0;
         const auto addButton = [&](int id, const wxString& label,
                                    const wxString& tooltip) {
-            auto* button = new wxButton(panel, id, label, wxDefaultPosition,
+            auto* button = new wxButton(parent, id, label, wxDefaultPosition,
                                         wxDefaultSize, buttonStyle);
             if (!tooltip.empty()) button->SetToolTip(tooltip);
             toolbar->Add(button, 0, wxRIGHT | wxBOTTOM |
@@ -2224,7 +2226,7 @@ private:
 
         // Make Find one indivisible wrap item so it remains beside the action
         // buttons whenever space permits, without making it a full-width row.
-        auto* findGroup = new wxPanel(panel);
+        auto* findGroup = new wxPanel(parent);
         auto* findRow = new wxBoxSizer(wxHORIZONTAL);
         findRow->Add(new wxStaticText(findGroup, wxID_ANY, "Find:"), 0,
                      wxALIGN_CENTER_VERTICAL | wxRIGHT, FromDIP(4));
@@ -2256,10 +2258,9 @@ private:
 
         root->Add(toolbar, 0,
                   wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(2));
-        panel->SetSizer(root);
         if (singlePanel) singlePanelFindText_ = findText;
         else conversationFindText_ = findText;
-        return panel;
+        return root;
     }
 
     wxTextCtrl* activeSemanticFindText() const {
