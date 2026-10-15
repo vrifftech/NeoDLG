@@ -57,6 +57,7 @@ include(GNUInstallDirs)
 
 message(STATUS "Using neoshared: ${NEOSHARED_ROOT}")
 include("${NEOSHARED_ROOT}/cmake/NeoMinimalRelease.cmake")
+set(NEOSHARED_ENABLE_ERF ON CACHE BOOL "Build shared archives for dialogue audio" FORCE)
 if(NOT TARGET neoshared::wx)
     add_subdirectory("${NEOSHARED_ROOT}"
         "${CMAKE_CURRENT_BINARY_DIR}/neoshared" EXCLUDE_FROM_ALL)
@@ -168,10 +169,11 @@ if(NEODLG_BUILD_WX_GUI OR NEODLG_BUILD_WX_MODULE)
         if(NOT EXISTS "${NEOSHARED_ROOT}/include/neoshared/GffResourceDocument.hpp")
             message(FATAL_ERROR "Update NeoShared: hosted GFF resource API required")
         endif()
-        add_library(neodlg_wx STATIC src/wx/EditorPanel.cpp)
+        include("${NEOSHARED_ROOT}/cmake/NeoAudio.cmake")
+        add_library(neodlg_wx STATIC src/wx/EditorPanel.cpp src/wx/DlgAudioPreview.cpp)
         add_library(neodlg::wx ALIAS neodlg_wx)
         target_include_directories(neodlg_wx PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/src")
-        target_link_libraries(neodlg_wx PUBLIC neodlg_core neoshared::wx)
+        target_link_libraries(neodlg_wx PUBLIC neodlg_core neoshared::wx neoshared::audio neoshared::bif)
         neodlg_link_wx(neodlg_wx)
         if(MSVC)
             target_compile_options(neodlg_wx PRIVATE /W4 /permissive-)
@@ -214,6 +216,9 @@ if(NEODLG_BUILD_WX_GUI OR NEODLG_BUILD_WX_MODULE)
         else()
             target_compile_options(NeoDLG PRIVATE -Wall -Wextra -Wpedantic)
         endif()
+
+        install(FILES "${NEOSHARED_ROOT}/licenses/miniaudio.txt"
+            DESTINATION ${CMAKE_INSTALL_DATADIR}/neodlg/licenses)
 
         install(TARGETS NeoDLG
             BUNDLE DESTINATION .

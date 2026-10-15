@@ -11,6 +11,7 @@
 
 #include "NeoDlgDialogs.hpp"
 #include "DlgTreeViewState.hpp"
+#include "DlgAudioPreview.hpp"
 
 #include "NeoDocumentTabs.hpp"
 #include "NeoGameDirectoryMenu.hpp"
@@ -658,6 +659,25 @@ public:
         InvalidateBestSize();
         Layout();
     }
+};
+
+class AudioResRefField final : public wxPanel {
+public:
+    AudioResRefField(wxWindow* parent, int playId) : wxPanel(parent, wxID_ANY) {
+        text_ = new wxTextCtrl(this, wxID_ANY);
+        play_ = new wxButton(this, playId, wxString::FromUTF8("\xE2\x96\xB6"),
+                             wxDefaultPosition, FromDIP(wxSize(30, -1)), wxBU_EXACTFIT);
+        play_->SetToolTip("Play this audio resref");
+        auto* row = new wxBoxSizer(wxHORIZONTAL);
+        row->Add(text_, 1, wxEXPAND);
+        row->Add(play_, 0, wxALIGN_CENTER_VERTICAL | wxLEFT, FromDIP(3));
+        SetSizer(row);
+    }
+    wxTextCtrl* Text() const { return text_; }
+    wxButton* Play() const { return play_; }
+private:
+    wxTextCtrl* text_ = nullptr;
+    wxButton* play_ = nullptr;
 };
 
 // A real multiline text control with a small, separate resize grip. Do not put
@@ -1631,6 +1651,9 @@ enum : int {
     ID_ConversationTree,
     ID_RawTree,
     ID_ApplyNode,
+    ID_CommitTlk,
+    ID_PlayVoice,
+    ID_PlaySound,
     ID_ApplyScripts,
     ID_ApplyPresentation,
     ID_ApplyLink,
@@ -1782,6 +1805,7 @@ private:
         bool saveInProgress = false;
 #if defined(__EMSCRIPTEN__)
         neobrowser::BrowserImportLease sourceImport;
+        neobrowser::BrowserImportLease tlkImport;
 #endif
         WorkspaceView workspaceView = WorkspaceView::Conversation;
         WorkspaceView semanticView = WorkspaceView::Conversation;
@@ -2095,6 +2119,9 @@ private:
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onDeleteNode, this, ID_DeleteNode);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onFindNext, this, ID_FindNext);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onApplyNode, this, ID_ApplyNode);
+        Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onCommitTlk, this, ID_CommitTlk);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { playAudio(nodeVo_); }, ID_PlayVoice);
+        Bind(wxEVT_BUTTON, [this](wxCommandEvent&) { playAudio(nodeSound_); }, ID_PlaySound);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onApplyScripts, this, ID_ApplyScripts);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onApplyPresentation, this, ID_ApplyPresentation);
         Bind(wxEVT_BUTTON, &NeoDLGPanelImpl::onApplyLink, this, ID_ApplyLink);
@@ -2600,7 +2627,9 @@ private:
                 if (!field.control->IsShown() || (field.label && !field.label->IsShown())) continue;
                 std::vector<wxWindow*> parts;
                 if (field.label) parts.push_back(field.label);
-                parts.push_back(field.control);
+                auto* fieldWindow = inspectorFieldWindow(field.control);
+                fieldWindow->InvalidateBestSize();
+                parts.push_back(fieldWindow);
                 if (field.unit && field.unit->IsShown()) parts.push_back(field.unit);
                 for (auto* companion : field.companions)
                     if (companion->IsShown()) parts.push_back(companion);
@@ -2640,6 +2669,8 @@ private:
     }
 
     wxWindow* inspectorFieldWindow(wxWindow* control) const {
+        if (auto* wrapper = dynamic_cast<AudioResRefField*>(control->GetParent()))
+            return wrapper;
         if (auto* wrapper = dynamic_cast<ResizableInspectorText*>(control->GetParent()))
             return wrapper;
         return control;
@@ -2728,6 +2759,7 @@ private:
                 }
                 root->Add(form, singlePanel ? 0 : 1,
                           wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, pad);
+                apply(root, page, ID_CommitTlk);
                 apply(root, page, ID_ApplyNode);
             } else if (index == 1) {
                 auto* form = newForm();
@@ -3076,14 +3108,21 @@ private:
         nodeLocalText_ = addResizableInspectorText(page, form, "Local text:",
             "NeoDLG local text", &nodeLocalTextLabel_, 0, 110);
         nodeResolvedText_ = addResizableInspectorText(page, form, "Resolved TLK text:",
-            "NeoDLG resolved TLK text", &nodeResolvedTextLabel_, wxTE_READONLY, 110);
-        nodeVo_ = addTextField(page, form, "Voice-over resref:", 0, wxDefaultSize, &nodeVoLabel_);
+            "NeoDLG resolved TLK text", &nodeResolvedTextLabel_, 0, 110);
+        nodeResolvedText_->SetToolTip("Edit this text, then Commit TLK Line to save it to the loaded talk table.");
+        nodeVoLabel_ = new wxStaticText(page, wxID_ANY, "Voice-over resref:");
+        form->Add(nodeVoLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+        auto* voiceField = new AudioResRefField(page, ID_PlayVoice);
+        nodeVo_ = voiceField->Text();
+        nodeVoPlay_ = voiceField->Play();
+        form->Add(voiceField, 1, wxEXPAND);
         nodeJadeSkippable_ = addCheckField(page, form, "Entry can be skipped", &nodeJadeSkippablePlaceholder_);
         nodeJadeSkippable_->SetToolTip(
             "Jade Empire Entry Skippable field. The runtime default is enabled when the field is absent.");
         nodeComment_ = addResizableInspectorText(page, form, "Designer comment:",
             "NeoDLG designer comment", &nodeCommentLabel_);
         root->Add(form, 0, wxEXPAND | wxLEFT | wxRIGHT | wxBOTTOM, FromDIP(3));
+        root->Add(new wxButton(page, ID_CommitTlk, "Commit TLK Line"), 0, wxALIGN_RIGHT | wxALL, FromDIP(3));
         root->Add(new wxButton(page, ID_ApplyNode, "Apply Line Changes"), 0, wxALIGN_RIGHT | wxALL, FromDIP(3));
     }
 
@@ -3136,7 +3175,12 @@ private:
         auto* form = new wxFlexGridSizer(2, 8, 8);
         form->AddGrowableCol(1, 1);
 
-        nodeSound_ = addTextField(page, form, "Sound resref:", 0, wxDefaultSize, &nodeSoundLabel_);
+        nodeSoundLabel_ = new wxStaticText(page, wxID_ANY, "Sound resref:");
+        form->Add(nodeSoundLabel_, 0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+        auto* soundField = new AudioResRefField(page, ID_PlaySound);
+        nodeSound_ = soundField->Text();
+        nodeSoundPlay_ = soundField->Play();
+        form->Add(soundField, 1, wxEXPAND);
         nodeDelay_ = addTextField(page, form, "Delay (s):", 0, wxDefaultSize, &nodeDelayLabel_);
         nodeDelay_->SetToolTip(
             "Auto (or -1) uses the game's default timing, stored as DWORD 4294967295. "
@@ -4105,9 +4149,8 @@ private:
                         "The active document changed while the TLK picker was open. Select the TLK again from the intended tab.");
                     return;
                 }
-                // TlkLookup owns all decoded strings after load, so this one-shot
-                // import can be released as soon as the callback returns.
                 loadTlkFromPath(import.paths().front(), false);
+                activeDocument().tlkImport = std::move(import);
             });
 #else
         const auto chosen = wxui::chooseOpenFile(this, "Open TLK", kTlkWildcard);
@@ -4472,6 +4515,38 @@ private:
         showSemanticWorkspace();
         selectSemanticNode(tab.searchResults[tab.searchIndex], std::nullopt);
         setModuleStatusText(wxString::Format("Match %zu of %zu", tab.searchIndex + 1, tab.searchResults.size()), 1);
+    }
+
+    void onCommitTlk(wxCommandEvent&) {
+        try {
+            const auto path = model().tlk().filename();
+            const auto ref = activeDocument().selectedNode.value();
+            const auto strref = dialogue().text(ref).strref;
+            dialogue().commitTlkText(ref, wxui::toStd(nodeResolvedText_->GetValue()));
+            for (auto& document : documents_) {
+                if (document.model->tlk().filename() == path) document.model->loadTlk(path);
+            }
+            refreshAll();
+#if defined(__EMSCRIPTEN__)
+            neobrowser::requestDownloadFile(path, path.filename().string(),
+                [](neobrowser::DownloadResult) {});
+#endif
+            setModuleStatusText("Committed TLK StrRef " + std::to_string(strref) + " to " + neoshared::pathToUtf8(path), 1);
+        } catch (const std::exception& ex) { wxui::showError(this, ex); }
+    }
+
+    void playAudio(wxTextCtrl* field) {
+        try {
+            const auto resref = wxui::toStd(field->GetValue());
+#if defined(__EMSCRIPTEN__)
+            audioPreview_.play(context_.resolveResource(resref, 4u).value());
+#else
+            const auto installation = neogames::resolver().resolveContext(
+                documentFilename(activeDocument()), dialogueGameContext()).installation.value();
+            audioPreview_.play(installation.installPath, resref);
+#endif
+            setModuleStatusText("Playing " + resref, 1);
+        } catch (const std::exception& ex) { wxui::showError(this, ex); }
     }
 
     void onApplyNode(wxCommandEvent&) {
@@ -5742,7 +5817,7 @@ private:
         for (wxWindow* window : nodeInspectorWindows()) if (window) window->Enable(enabled);
         // Navigation/scrollbars stay enabled even with no selected node. Only
         // data entry and Apply actions depend on the selection.
-        for (int id : {ID_ApplyNode, ID_ApplyScripts, ID_ApplyPresentation}) {
+        for (int id : {ID_ApplyNode, ID_CommitTlk, ID_ApplyScripts, ID_ApplyPresentation}) {
             if (auto* button = FindWindow(id)) button->Enable(enabled);
         }
         if (!enabled) enableLinkInspector(false);
@@ -5754,7 +5829,7 @@ private:
     }
 
     std::vector<wxWindow*> nodeInspectorWindows() const {
-        return {nodeSpeaker_, nodeListener_, nodeStrRef_, nodeStringType_, nodeLocalText_, nodeResolvedText_, nodeVo_,
+        return {nodeSpeaker_, nodeListener_, nodeStrRef_, nodeStringType_, nodeLocalText_, nodeResolvedText_, nodeVo_, nodeVoPlay_, nodeSoundPlay_,
                 nodeJadeSkippable_, nodeComment_, nodeScript1_, nodeScript2_, nodeScriptCamEntry_, nodeCameraEntry_,
                 nodeScriptCamReplies_, nodeCameraReplies_, nodeQuest_, nodeQuestEntry_, nodePlotIndex_, nodePlotXp_,
                 nodeActionStrA_, nodeActionStrB_, actionParamFields_, nodeSound_, nodeDelay_, nodeWaitFlags_,
@@ -6357,9 +6432,9 @@ private:
             linkParamFields_->SetVisibleColumns(false, false);
         }
 
-        const auto showPair = [](wxWindow* label, wxWindow* control, bool show) {
+        const auto showPair = [this](wxWindow* label, wxWindow* control, bool show) {
             if (label) label->Show(show);
-            if (control) control->Show(show);
+            if (control) { control->Show(show); inspectorFieldWindow(control)->Show(show); }
         };
         const auto showWindows = [](std::initializer_list<wxWindow*> windows, bool show) {
             for (wxWindow* window : windows) {
@@ -6611,6 +6686,9 @@ private:
     wxTextCtrl* nodeLocalText_ = nullptr;
     wxTextCtrl* nodeResolvedText_ = nullptr;
     wxTextCtrl* nodeVo_ = nullptr;
+    wxButton* nodeVoPlay_ = nullptr;
+    wxButton* nodeSoundPlay_ = nullptr;
+    DlgAudioPreview audioPreview_;
     wxCheckBox* nodeJadeSkippable_ = nullptr;
     wxTextCtrl* nodeComment_ = nullptr;
 

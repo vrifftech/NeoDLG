@@ -1,4 +1,5 @@
 #include "neodlg/model/DlgDocument.hpp"
+#include <neoshared/PathUtf8.hpp>
 
 #include <algorithm>
 #include <cctype>
@@ -515,6 +516,17 @@ void DlgDocument::setText(DlgNodeRef ref, const DlgTextValue& value) {
         }
     }
     markDirty();
+}
+
+void DlgDocument::commitTlkText(DlgNodeRef ref, const std::string& value) {
+    const auto path = model_.tlk().filename();
+    neotlk::TalkTable table(neoshared::pathToUtf8(path));
+    const auto strref = text(ref).strref;
+    auto entry = table.entryAtStrRef(strref);
+    entry.text = value;
+    table.replaceEntry(strref, entry);
+    table.save();
+    model_.loadTlk(path);
 }
 
 std::string DlgDocument::speaker(DlgNodeRef ref) const {

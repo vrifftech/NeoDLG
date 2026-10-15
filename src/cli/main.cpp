@@ -29,7 +29,7 @@ void usage(std::ostream& out) {
         << "  neodlg-cli dump <dlg> [filter-term] [--tlk dialog.tlk]\n"
         << "  neodlg-cli search <dlg> <term> [--tlk dialog.tlk]\n"
         << "  neodlg-cli export <dlg> <xml|json> <output>\n"
-        << "  neodlg-cli import <input-dlg> <output-dlg> <xml|json> <input-document>\n"
+        << "  neodlg-cli import <output-dlg> <xml|json> <input-document>\n"
         << "  neodlg-cli diff-tslpatcher <original-dlg> <modified-input> <output-dir|fragment.ini> [--modified-format xml|json|dlg|gff|kotor|native|auto] [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--ini installer.ini] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
         << "  neodlg-cli diff-tslpatcher-import <original-dlg> <modified-input> <xml|json|dlg|gff|kotor|native|auto> <output-dir|fragment.ini> [--package|--fragment] [--patch-mode dynamic|replace] [--filename name] [--ini installer.ini] [--destination override|Modules\\module.mod] [--allow-unsupported] [--generic-gff]\n"
         << "  neodlg-cli roundtrip <input-dlg> <output-dlg>\n"
@@ -368,17 +368,17 @@ int main(int argc, char** argv) {
         }
 
         if (command == "import") {
-            if (argc != 6) { usage(std::cerr); return 2; }
-            const auto format = neotabular::parseFormat(argv[4]);
+            if (argc != 5) { usage(std::cerr); return 2; }
+            const auto format = neotabular::parseFormat(argv[3]);
             GffModel model;
             if (format == neotabular::Format::Xml) {
-                model.importXml(readTextFile(argv[5]));
+                model.importXml(readTextFile(argv[4]));
             } else if (format == neotabular::Format::Json) {
-                model.importXml(neodlg::gffJsonToXml(readTextFile(argv[5])));
+                model.importXml(neodlg::gffJsonToXml(readTextFile(argv[4])));
             } else {
                 throw std::invalid_argument("NeoDLG imports only semantic XML or JSON. CSV/TSV flattened import is not supported for DLG files.");
             }
-            model.save(argv[3]);
+            model.save(argv[2]);
             return 0;
         }
 

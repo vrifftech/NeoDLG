@@ -142,6 +142,7 @@ public:
 
     DlgTextValue text(DlgNodeRef ref) const;
     void setText(DlgNodeRef ref, const DlgTextValue& value);
+    void commitTlkText(DlgNodeRef ref, const std::string& text);
     std::string speaker(DlgNodeRef ref) const;
     std::string nodeLabel(DlgNodeRef ref, std::size_t maxText = 100) const;
     std::string nodeKindName(DlgNodeKind kind) const;
