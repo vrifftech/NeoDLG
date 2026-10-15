@@ -818,6 +818,205 @@ private:
     bool dragging_ = false;
 };
 
+class LocalizedTextEditor final : public wxPanel {
+public:
+    LocalizedTextEditor(wxWindow* parent, std::function<void()> relayout,
+                        std::function<void(wxWindow*)> styleRow)
+        : wxPanel(parent, wxID_ANY), relayout_(std::move(relayout)),
+          styleRow_(std::move(styleRow)) {
+        single_ = new ResizableInspectorText(this, "NeoDLG local text", 0, relayout_, 110);
+        multiple_ = new wxPanel(this);
+        rowsSizer_ = new wxBoxSizer(wxVERTICAL);
+        add_ = new wxButton(multiple_, wxID_ANY, "+", wxDefaultPosition,
+                            wxDefaultSize, wxBU_EXACTFIT);
+        add_->SetName("Add dialogue language");
+        add_->SetToolTip("Add another language and text box.");
+        auto* multipleSizer = new wxBoxSizer(wxVERTICAL);
+        multipleSizer->Add(rowsSizer_, 0, wxEXPAND);
+        multipleSizer->Add(add_, 0, wxTOP, FromDIP(4));
+        multiple_->SetSizer(multipleSizer);
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        root->Add(single_, 0, wxEXPAND);
+        root->Add(multiple_, 0, wxEXPAND);
+        SetSizer(root);
+        multiple_->Hide();
+        add_->Bind(wxEVT_BUTTON, [this](wxCommandEvent&) {
+            addRow(GffLocalizedSubstring(availableIds_.front(), ""), true);
+            refreshChoices();
+            relayout_();
+            rows_.back().editor->Text()->SetFocus();
+        });
+    }
+
+    void SetValue(const std::vector<GffLocalizedSubstring>& value) {
+        stored_ = value;
+        single_->Text()->ChangeValue(defaultText());
+        rows_.clear();
+        rowsSizer_->Clear(true);
+        for (const auto& substring : stored_) addRow(substring, true);
+        if (stored_.empty()) addRow(GffLocalizedSubstring(0, ""), false);
+        refreshChoices();
+        InvalidateBestSize();
+    }
+
+    std::vector<GffLocalizedSubstring> GetValue() const {
+        if (multiLanguage_) {
+            std::vector<GffLocalizedSubstring> result;
+            for (const auto& row : rows_) {
+                const wxString text = row.editor->Text()->GetValue();
+                if (row.present || !text.empty()) {
+                    auto substring = row.value;
+                    if (text != wxui::toWx(substring.GetString()))
+                        substring.SetString(wxui::toStd(text));
+                    result.push_back(std::move(substring));
+                }
+            }
+            return result;
+        }
+        auto result = stored_;
+        const wxString text = single_->Text()->GetValue();
+        if (text != defaultText()) {
+            const auto found = std::find_if(result.begin(), result.end(),
+                [](const auto& substring) { return substring.stringid == 0; });
+            if (found != result.end()) {
+                if (text.empty()) result.erase(found);
+                else found->SetString(wxui::toStd(text));
+            } else if (!text.empty()) {
+                result.emplace_back(0, wxui::toStd(text));
+            }
+        }
+        return result;
+    }
+
+    void SetMultiLanguage(bool enabled) {
+        const auto value = GetValue();
+        multiLanguage_ = enabled;
+        SetValue(value);
+        single_->Show(!enabled);
+        multiple_->Show(enabled);
+        relayout_();
+    }
+
+    void RefreshMetrics(bool singlePanel) {
+        singlePanel_ = singlePanel;
+        single_->SetSinglePanel(singlePanel);
+        single_->RefreshMetrics();
+        for (auto& row : rows_) {
+            row.editor->SetSinglePanel(singlePanel);
+            row.editor->RefreshMetrics();
+            row.panel->InvalidateBestSize();
+            row.panel->Layout();
+        }
+        multiple_->InvalidateBestSize();
+        multiple_->Layout();
+        InvalidateBestSize();
+        Layout();
+    }
+
+private:
+    struct Language { int id; const char* name; };
+    inline static constexpr Language languages_[] = {
+        {0, "English"}, {1, "French"}, {2, "German"}, {3, "Italian"},
+        {4, "Spanish"}, {5, "Polish"}, {128, "Korean"},
+        {129, "Chinese (Traditional)"}, {130, "Chinese (Simplified)"}, {131, "Japanese"}
+    };
+    struct Row {
+        GffLocalizedSubstring value;
+        bool present;
+        wxPanel* panel;
+        wxChoice* language;
+        ResizableInspectorText* editor;
+        std::vector<int> choices;
+    };
+
+    wxString defaultText() const {
+        for (const auto& substring : stored_)
+            if (substring.stringid == 0) return wxui::toWx(substring.GetString());
+        return {};
+    }
+
+    static wxString languageLabel(int stringId) {
+        wxString name = wxString::Format("Language %d", stringId / 2);
+        for (const auto& language : languages_)
+            if (language.id == stringId / 2) name = language.name;
+        return name + (stringId % 2 ? " (female)" : " (neutral/male)");
+    }
+
+    void refreshChoices() {
+        availableIds_.clear();
+        for (int gender : {0, 1}) {
+            for (const auto& language : languages_) {
+                const int id = language.id * 2 + gender;
+                if (std::none_of(rows_.begin(), rows_.end(),
+                    [id](const auto& row) { return row.value.stringid == id; }))
+                    availableIds_.push_back(id);
+            }
+        }
+        for (auto& row : rows_) {
+            row.choices = availableIds_;
+            row.choices.push_back(row.value.stringid);
+            std::sort(row.choices.begin(), row.choices.end());
+            row.language->Clear();
+            for (const int id : row.choices) {
+                const int index = row.language->Append(languageLabel(id));
+                if (id == row.value.stringid) row.language->SetSelection(index);
+            }
+        }
+        add_->Enable(!availableIds_.empty());
+    }
+
+    void addRow(const GffLocalizedSubstring& value, bool present) {
+        auto* panel = new wxPanel(multiple_);
+        auto* language = new wxChoice(panel, wxID_ANY);
+        language->SetName("Dialogue language");
+        auto* remove = new wxButton(panel, wxID_ANY, "-", wxDefaultPosition,
+                                   wxDefaultSize, wxBU_EXACTFIT);
+        remove->SetName("Remove dialogue language");
+        remove->SetToolTip("Remove this language and text box when line changes are applied.");
+        auto* heading = new wxBoxSizer(wxHORIZONTAL);
+        heading->Add(language, 1, wxEXPAND | wxRIGHT, FromDIP(4));
+        heading->Add(remove, 0);
+        auto* editor = new ResizableInspectorText(panel, "NeoDLG translated text", 0, relayout_, 110);
+        editor->Text()->ChangeValue(wxui::toWx(value.GetString()));
+        editor->SetSinglePanel(singlePanel_);
+        auto* root = new wxBoxSizer(wxVERTICAL);
+        root->Add(heading, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+        root->Add(editor, 0, wxEXPAND);
+        panel->SetSizer(root);
+        rowsSizer_->Add(panel, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
+        rows_.push_back({value, present, panel, language, editor, {}});
+        language->Bind(wxEVT_CHOICE, [this, language](wxCommandEvent&) {
+            auto& row = *std::find_if(rows_.begin(), rows_.end(),
+                [language](const auto& item) { return item.language == language; });
+            row.value.stringid = row.choices[language->GetSelection()];
+            row.present = true;
+            refreshChoices();
+        });
+        remove->Bind(wxEVT_BUTTON, [this, panel](wxCommandEvent&) {
+            const auto row = std::find_if(rows_.begin(), rows_.end(),
+                [panel](const auto& item) { return item.panel == panel; });
+            rows_.erase(row);
+            rowsSizer_->Detach(panel);
+            panel->Destroy();
+            refreshChoices();
+            relayout_();
+        });
+        styleRow_(panel);
+    }
+
+    std::function<void()> relayout_;
+    std::function<void(wxWindow*)> styleRow_;
+    ResizableInspectorText* single_;
+    wxPanel* multiple_;
+    wxBoxSizer* rowsSizer_;
+    wxButton* add_;
+    std::vector<Row> rows_;
+    std::vector<int> availableIds_;
+    std::vector<GffLocalizedSubstring> stored_;
+    bool multiLanguage_ = false;
+    bool singlePanel_ = false;
+};
+
 wxTextCtrl* addTextField(wxWindow* parent,
                          wxFlexGridSizer* form,
                          const wxString& label,
@@ -1642,6 +1841,7 @@ enum : int {
     ID_ViewConversation,
     ID_ViewSinglePanel,
     ID_ViewRaw,
+    ID_MultiLanguageSupport,
     ID_DarkMode,
     ID_FontIncrease,
     ID_FontDecrease,
@@ -1680,6 +1880,7 @@ public:
     NeoDLGPanelImpl(wxWindow* parent, neomodules::Context context)
         : DLGEditorPanel(parent, std::move(context)),
           settings_(kAppName) {
+        multiLanguage_ = settings_.readBool("Editor/MultiLanguageSupport");
         buildMenus();
         buildWindow();
         createModuleStatusBar(2);
@@ -2013,6 +2214,9 @@ private:
         view->Append(ID_FontReset, "Reset Text Size\tCtrl+0");
         }
 
+        auto* options = new wxMenu;
+        options->AppendCheckItem(ID_MultiLanguageSupport, "Multi-Language Support")->Check(multiLanguage_);
+
         auto* help = new wxMenu;
         help->Append(ID_ModuleAbout, "&About NeoDLG");
 
@@ -2023,6 +2227,7 @@ private:
         bar->Append(importMenu, "&Import");
         bar->Append(exportMenu, "E&xport");
         bar->Append(view, "&View");
+        bar->Append(options, "&Options");
         if (!context_.embedded) bar->Append(help, "&Help"); else delete help;
         setModuleMenus(bar);
 
@@ -2075,6 +2280,11 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspaceView(WorkspaceView::SinglePanel); }, ID_ViewSinglePanel);
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { setWorkspaceView(WorkspaceView::Raw); }, ID_ViewRaw);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onToggleDarkMode, this, ID_DarkMode);
+        Bind(wxEVT_MENU, [this](wxCommandEvent& event) {
+            multiLanguage_ = event.IsChecked();
+            nodeLocalText_->SetMultiLanguage(multiLanguage_);
+            settings_.writeBool("Editor/MultiLanguageSupport", multiLanguage_);
+        }, ID_MultiLanguageSupport);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onIncreaseFontScale, this, ID_FontIncrease);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onDecreaseFontScale, this, ID_FontDecrease);
         Bind(wxEVT_MENU, &NeoDLGPanelImpl::onResetFontScale, this, ID_FontReset);
@@ -2508,6 +2718,7 @@ private:
             editor->SetSinglePanel(singlePanelActive_);
             editor->RefreshMetrics();
         }
+        nodeLocalText_->RefreshMetrics(singlePanelActive_);
         for (const auto& scalar : inspectorFieldMetrics_) {
             auto* field = scalar.control;
             if (singlePanelActive_) {
@@ -3105,8 +3316,17 @@ private:
 
         nodeStrRef_ = addTextField(page, form, "Text StrRef:", 0, wxDefaultSize, &nodeStrRefLabel_);
         nodeStringType_ = addTextField(page, form, "Jade string type:", 0, wxDefaultSize, &nodeStringTypeLabel_);
-        nodeLocalText_ = addResizableInspectorText(page, form, "Local text:",
-            "NeoDLG local text", &nodeLocalTextLabel_, 0, 110);
+        nodeLocalTextLabel_ = new wxStaticText(page, wxID_ANY, "Local text:");
+        form->Add(nodeLocalTextLabel_, 0, wxALIGN_TOP | wxRIGHT | wxTOP, FromDIP(3));
+        nodeLocalText_ = new LocalizedTextEditor(page,
+            [this]() { queueInspectorLayoutRefresh(); },
+            [this](wxWindow* row) {
+                wxui::applyTheme(row, darkMode_);
+                neoview::applyFontScale(row, fontScale_);
+                bindInspectorWheelForwarding(row);
+            });
+        nodeLocalText_->SetMultiLanguage(multiLanguage_);
+        form->Add(nodeLocalText_, 0, wxEXPAND);
         nodeResolvedText_ = addResizableInspectorText(page, form, "Resolved TLK text:",
             "NeoDLG resolved TLK text", &nodeResolvedTextLabel_, 0, 110);
         nodeResolvedText_->SetToolTip("Edit this text, then Commit TLK Line to save it to the loaded talk table.");
@@ -4266,8 +4486,9 @@ private:
             const DlgNodeRef ref{kind, i};
             const DlgTextValue textValue = document.text(ref);
 
-            std::string visible = !textValue.localText.empty()
-                ? textValue.localText
+            const std::string localText = textValue.localText();
+            std::string visible = !localText.empty()
+                ? localText
                 : textValue.resolvedText;
             if (visible.empty() && textValue.strref != 0xFFFFFFFFu) {
                 visible = "StrRef " + std::to_string(textValue.strref);
@@ -4278,7 +4499,7 @@ private:
             const std::string nodeId = document.nodeIdText(ref);
             const std::string speaker = document.speaker(ref);
             std::string search = std::to_string(i) + " " + nodeId + " " + speaker + " " +
-                                 textValue.localText + " " + textValue.resolvedText;
+                                 localText + " " + textValue.resolvedText;
             if (textValue.strref != 0xFFFFFFFFu) {
                 search += " StrRef " + std::to_string(textValue.strref);
             }
@@ -4559,7 +4780,7 @@ private:
             value.stringType = nodeStringType_->IsEnabled()
                                    ? neogff::ParseUInt32Decimal(wxui::toStd(nodeStringType_->GetValue()))
                                    : value.stringType;
-            value.localText = nodeLocalText_->IsEnabled() ? wxui::toStd(nodeLocalText_->GetValue()) : std::string{};
+            value.localStrings = nodeLocalText_->GetValue();
             document.setText(ref, value);
 
             const bool jade = document.dialect() == DlgDialect::JadeEmpire;
@@ -5676,7 +5897,7 @@ private:
                                      ? wxString("-1")
                                      : wxString::Format("%u", value.strref));
         nodeStringType_->ChangeValue(wxString::Format("%u", value.stringType));
-        nodeLocalText_->ChangeValue(wxui::toWx(value.localText));
+        nodeLocalText_->SetValue(value.localStrings);
         nodeResolvedText_->ChangeValue(wxui::toWx(value.resolvedText));
         nodeVo_->ChangeValue(jadeEntry
                                  ? wxui::toWx(document.nodeField(ref, "VoiceOver"))
@@ -5855,7 +6076,8 @@ private:
             nodeListener_->Clear();
             nodeListener_->ChangeValue("");
         }
-        for (wxTextCtrl* control : {nodeStrRef_, nodeStringType_, nodeLocalText_, nodeResolvedText_, nodeVo_, nodeComment_,
+        nodeLocalText_->SetValue({});
+        for (wxTextCtrl* control : {nodeStrRef_, nodeStringType_, nodeResolvedText_, nodeVo_, nodeComment_,
                                     nodeScript1_, nodeScript2_, nodeScriptCamEntry_, nodeCameraEntry_,
                                     nodeScriptCamReplies_, nodeCameraReplies_, nodeQuest_, nodeQuestEntry_, nodePlotIndex_,
                                     nodePlotXp_, nodeActionStrA_, nodeActionStrB_, nodeSound_, nodeDelay_, nodeWaitFlags_, nodeCameraId_,
@@ -6608,6 +6830,7 @@ private:
 
 
     neosettings::AppSettings settings_;
+    bool multiLanguage_ = false;
     std::vector<DocumentTab> documents_;
     std::size_t activeDocumentIndex_ = neotabs::npos;
     bool tabSwitchInProgress_ = false;
@@ -6683,7 +6906,7 @@ private:
     wxComboBox* nodeListener_ = nullptr;
     wxTextCtrl* nodeStrRef_ = nullptr;
     wxTextCtrl* nodeStringType_ = nullptr;
-    wxTextCtrl* nodeLocalText_ = nullptr;
+    LocalizedTextEditor* nodeLocalText_ = nullptr;
     wxTextCtrl* nodeResolvedText_ = nullptr;
     wxTextCtrl* nodeVo_ = nullptr;
     wxButton* nodeVoPlay_ = nullptr;

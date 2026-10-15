@@ -478,7 +478,7 @@ DlgTextValue DlgDocument::text(DlgNodeRef ref) const {
     const GffField* field = structure->GetFieldByLabel("Text");
     if (const auto* loc = dynamic_cast<const GffLocalizedStringField*>(field)) {
         result.strref = loc->strref;
-        result.localText = loc->GetStringById(0);
+        result.localStrings = loc->substrings;
     } else if (const auto* jade = dynamic_cast<const GffJadeStringRefField*>(field)) {
         result.stringType = jade->stringType;
         result.strref = jade->strref;
@@ -509,11 +509,11 @@ void DlgDocument::setText(DlgNodeRef ref, const DlgTextValue& value) {
             structure->AddField(std::move(created));
         }
         loc->strref = value.strref;
-        if (value.localText.empty()) {
-            loc->DeleteStringByID(0);
-        } else {
-            loc->SetStringByID(0, value.localText);
-        }
+        loc->substrings.clear();
+        loc->stringcount = 0;
+        loc->bytesize = 8;
+        for (const auto& substring : value.localStrings)
+            loc->AddString(substring.stringid, substring.GetString());
     }
     markDirty();
 }
@@ -562,7 +562,8 @@ std::string DlgDocument::nodeIdText(DlgNodeRef ref) const {
 
 std::string DlgDocument::nodeLabel(DlgNodeRef ref, std::size_t maxText) const {
     const DlgTextValue nodeText = text(ref);
-    std::string visible = !nodeText.localText.empty() ? nodeText.localText : nodeText.resolvedText;
+    const std::string localText = nodeText.localText();
+    std::string visible = !localText.empty() ? localText : nodeText.resolvedText;
     if (visible.empty() && nodeText.strref != 0xFFFFFFFFu) visible = "StrRef " + std::to_string(nodeText.strref);
     if (visible.empty()) visible = "(no text)";
     std::string result = nodeKindName(ref.kind) + " " + std::to_string(ref.index);

@@ -73,8 +73,14 @@ struct DlgNodeClipboard {
 struct DlgTextValue {
     std::uint32_t stringType = 4;
     std::uint32_t strref = 0xFFFFFFFFu;
-    std::string localText;
+    std::vector<GffLocalizedSubstring> localStrings;
     std::string resolvedText;
+
+    std::string localText() const {
+        for (const auto& substring : localStrings)
+            if (substring.stringid == 0) return substring.GetString();
+        return {};
+    }
 };
 
 struct DlgAnimation {
