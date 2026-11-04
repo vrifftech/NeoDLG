@@ -12,7 +12,7 @@ The editor supports:
 - TLK lookup for resolved dialogue text.
 - A structured GFF tree view.
 
-- Support is offered in the OpenKotOR Discord.
+Support is offered in the OpenKotOR Discord.
 
 [![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
 
