@@ -12,10 +12,14 @@ The editor supports:
 - TLK lookup for resolved dialogue text.
 - A structured GFF tree view.
 
+- Support is offered in the OpenKotOR Discord.
+
+[![OpenKotOR Discord](https://discordapp.com/api/guilds/739590575359262792/widget.png?style=banner2)](https://discord.gg/OpenKotOR)
+
 
 ## Conversation editor
 
-The main workspace has two views.
+The main workspace has three views.
 
 ### Conversation
 ![neodlgui](https://github.com/vrifftech/NeoDLG/blob/main/images/neodlg.png)
