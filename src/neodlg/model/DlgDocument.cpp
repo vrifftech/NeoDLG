@@ -484,7 +484,8 @@ DlgTextValue DlgDocument::text(DlgNodeRef ref) const {
         result.strref = jade->strref;
     }
     if (model_.tlk().loaded() && result.strref != 0xFFFFFFFFu) {
-        const auto resolved = model_.tlk().resolve(result.strref);
+        const auto resolved = field->fieldtype == FIELD_TYPE_JADE_STRREF
+            ? model_.tlk().resolve(result.strref) : model_.tlk().resolveKotor(result.strref);
         if (resolved) result.resolvedText = *resolved;
     }
     return result;
@@ -580,7 +581,7 @@ bool DlgDocument::hasNodeField(DlgNodeRef ref, const std::string& label) const {
 
 std::string DlgDocument::nodeField(DlgNodeRef ref, const std::string& label) const {
     const GffStruct* structure = node(ref);
-    return structure ? stringValue(structure->GetFieldByLabel(label)) : std::string{};
+    return structure ? neotlk::decodeTextBytes(stringValue(structure->GetFieldByLabel(label)), model_.textEncoding()) : std::string{};
 }
 
 void DlgDocument::setNodeField(DlgNodeRef ref,
@@ -589,7 +590,7 @@ void DlgDocument::setNodeField(DlgNodeRef ref,
                                const std::string& value) {
     GffStruct* structure = node(ref);
     if (!structure) throw std::out_of_range("Dialogue node does not exist.");
-    setField(*structure, label, fieldType, value);
+    setField(*structure, label, fieldType, neotlk::encodeTextBytes(value, model_.textEncoding()));
     markDirty();
 }
 
@@ -607,7 +608,7 @@ bool DlgDocument::hasLinkField(DlgLinkRef ref, const std::string& label) const {
 
 std::string DlgDocument::linkField(DlgLinkRef ref, const std::string& label) const {
     const GffStruct* structure = link(ref);
-    return structure ? stringValue(structure->GetFieldByLabel(label)) : std::string{};
+    return structure ? neotlk::decodeTextBytes(stringValue(structure->GetFieldByLabel(label)), model_.textEncoding()) : std::string{};
 }
 
 void DlgDocument::setLinkField(DlgLinkRef ref,
@@ -616,7 +617,7 @@ void DlgDocument::setLinkField(DlgLinkRef ref,
                                const std::string& value) {
     GffStruct* structure = link(ref);
     if (!structure) throw std::out_of_range("Dialogue link does not exist.");
-    setField(*structure, label, fieldType, value);
+    setField(*structure, label, fieldType, neotlk::encodeTextBytes(value, model_.textEncoding()));
     markDirty();
 }
 
@@ -634,7 +635,7 @@ bool DlgDocument::hasRootField(const std::string& label) const {
 
 std::string DlgDocument::rootField(const std::string& label) const {
     const GffStruct* structure = root();
-    return structure ? stringValue(structure->GetFieldByLabel(label)) : std::string{};
+    return structure ? neotlk::decodeTextBytes(stringValue(structure->GetFieldByLabel(label)), model_.textEncoding()) : std::string{};
 }
 
 void DlgDocument::setRootField(const std::string& label,
@@ -642,7 +643,7 @@ void DlgDocument::setRootField(const std::string& label,
                                const std::string& value) {
     GffStruct* structure = root();
     if (!structure) throw std::runtime_error("DLG root structure is unavailable.");
-    setField(*structure, label, fieldType, value);
+    setField(*structure, label, fieldType, neotlk::encodeTextBytes(value, model_.textEncoding()));
     markDirty();
 }
 

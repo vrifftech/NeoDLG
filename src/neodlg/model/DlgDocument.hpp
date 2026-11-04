@@ -78,7 +78,7 @@ struct DlgTextValue {
 
     std::string localText() const {
         for (const auto& substring : localStrings)
-            if (substring.stringid == 0) return substring.GetString();
+            if (substring.stringid == 0) return neogff::decodeGffText(substring.GetString(), substring.stringid / 2);
         return {};
     }
 };

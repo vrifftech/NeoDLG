@@ -866,8 +866,8 @@ public:
                 const wxString text = row.editor->Text()->GetValue();
                 if (row.present || !text.empty()) {
                     auto substring = row.value;
-                    if (text != wxui::toWx(substring.GetString()))
-                        substring.SetString(wxui::toStd(text));
+                    if (text != wxui::toWx(neogff::decodeGffText(substring.GetString(), substring.stringid / 2)))
+                        substring.SetString(neogff::encodeGffText(wxui::toStd(text), substring.stringid / 2));
                     result.push_back(std::move(substring));
                 }
             }
@@ -880,9 +880,9 @@ public:
                 [](const auto& substring) { return substring.stringid == 0; });
             if (found != result.end()) {
                 if (text.empty()) result.erase(found);
-                else found->SetString(wxui::toStd(text));
+                else found->SetString(neogff::encodeGffText(wxui::toStd(text)));
             } else if (!text.empty()) {
-                result.emplace_back(0, wxui::toStd(text));
+                result.emplace_back(0, neogff::encodeGffText(wxui::toStd(text)));
             }
         }
         return result;
@@ -931,7 +931,7 @@ private:
 
     wxString defaultText() const {
         for (const auto& substring : stored_)
-            if (substring.stringid == 0) return wxui::toWx(substring.GetString());
+            if (substring.stringid == 0) return wxui::toWx(neogff::decodeGffText(substring.GetString(), substring.stringid / 2));
         return {};
     }
 
@@ -977,7 +977,7 @@ private:
         heading->Add(language, 1, wxEXPAND | wxRIGHT, FromDIP(4));
         heading->Add(remove, 0);
         auto* editor = new ResizableInspectorText(panel, "NeoDLG translated text", 0, relayout_, 110);
-        editor->Text()->ChangeValue(wxui::toWx(value.GetString()));
+        editor->Text()->ChangeValue(wxui::toWx(neogff::decodeGffText(value.GetString(), value.stringid / 2)));
         editor->SetSinglePanel(singlePanel_);
         auto* root = new wxBoxSizer(wxVERTICAL);
         root->Add(heading, 0, wxEXPAND | wxBOTTOM, FromDIP(4));
@@ -1925,7 +1925,7 @@ public:
     bool openResource(neoshared::ResourceDocument input) override {
         if (activateResource(input.identity)) return true;
         auto candidate = std::make_unique<GffModel>();
-        neoshared::loadGffResource(input, candidate->gff(), "DLG ");
+        neoshared::loadGffResource(input, *candidate, "DLG ");
         auto savedContents = dlgContentCheckpoint(*candidate);
 
         // Parse before creating/replacing a tab, so a failed load leaves the UI intact.
