@@ -808,6 +808,10 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultLink(DlgLinkOwner owner, std:
     }
 
     result->AddField(std::make_unique<GffResRefField>("Active", ""));
+    if (owner != DlgLinkOwner::StartingList) {
+        result->AddField(std::make_unique<GffByteField>("IsChild", 0));
+        result->AddField(std::make_unique<GffExoStringField>("LinkComment", ""));
+    }
     if (flavor() == DlgFlavor::Kotor2) {
         result->AddField(std::make_unique<GffResRefField>("Active2", ""));
         for (int i = 1; i <= 5; ++i) {
@@ -820,7 +824,6 @@ std::unique_ptr<GffStruct> DlgDocument::makeDefaultLink(DlgLinkOwner owner, std:
         result->AddField(std::make_unique<GffExoStringField>("ParamStrA", ""));
         result->AddField(std::make_unique<GffExoStringField>("ParamStrB", ""));
     }
-    (void)owner;
     return result;
 }
 
