@@ -884,9 +884,17 @@ void compareStructs(EmitContext& context,
 
     for (const auto& originalField : originalFields) {
         if (!seen.count(originalField.first)) {
-            context.project.unsupported.push_back(
-                "TSLPatcher cannot delete GFF field " +
-                appendPath(path, originalField.first) + ".");
+            if (!dynamicLinkTargetRoot.empty() && originalField.first == "LinkComment" &&
+                originalField.second->fieldtype == FIELD_TYPE_CEXOSTRING) {
+                // An absent link comment represents empty editor text.
+                emitDirectScalarModification(
+                    context, appendPath(path, originalField.first),
+                    GffExoStringField("LinkComment", ""));
+            } else {
+                context.project.unsupported.push_back(
+                    "TSLPatcher cannot delete GFF field " +
+                    appendPath(path, originalField.first) + ".");
+            }
         }
     }
 }
