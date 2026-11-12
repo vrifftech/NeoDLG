@@ -1,6 +1,6 @@
 #pragma once
 
-#define NEODLG_VERSION_STRING "1.1.5"
+#define NEODLG_VERSION_STRING "1.1.6"
 
 namespace neodlg {
 
