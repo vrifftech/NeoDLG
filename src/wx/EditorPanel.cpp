@@ -4988,12 +4988,43 @@ private:
         });
     }
 
+    void offerLinkedNodeChanges(DlgDocument& document, DlgLinkRef source, const GffStruct& before) {
+        std::vector<const GffField*> changed;
+        wxString fields;
+        for (const auto& field : document.link(source)->allFields()) {
+            const auto label = field->GetLabel();
+            if (label == "Index" || label == "IsChild") continue;
+            const auto* previous = before.GetFieldByLabel(label);
+            if (previous && previous->fieldtype == field->fieldtype &&
+                previous->GetString() == field->GetString()) continue;
+            changed.push_back(field.get());
+            if (!fields.empty()) fields += ", ";
+            fields += wxui::toWx(label);
+        }
+        if (changed.empty()) return;
+        const auto links = document.incomingLinks(document.targetOf(source).value());
+        if (links.size() < 2) return;
+        wxMessageDialog prompt(this,
+            wxString::Format("Apply these changes to all other links to this dialogue node?\n\nOther links: %llu\nChanged fields: ",
+                             static_cast<unsigned long long>(links.size() - 1)) + fields,
+            "Apply Changes to Linked Nodes", wxYES_NO | wxNO_DEFAULT | wxICON_QUESTION);
+        prompt.SetYesNoLabels("All Links", "This Link Only");
+        if (prompt.ShowModal() != wxID_YES) return;
+        for (const auto* field : changed) {
+            const auto label = field->GetLabel();
+            const auto value = document.linkField(source, label);
+            for (const auto& link : links)
+                if (!(link == source)) document.setLinkField(link, label, field->fieldtype, value);
+        }
+    }
+
     void onApplyLink(wxCommandEvent&) {
         refreshContextualInspector();
         if (!activeDocument().selectedLink) return;
         const DlgLinkRef ref = *activeDocument().selectedLink;
         mutate("Edit dialogue link conditions", [this, ref]() {
             DlgDocument document = dialogue();
+            const auto before = document.link(ref)->Clone();
             const bool jade = document.dialect() == DlgDialect::JadeEmpire;
             const std::string ownerPath = ref.owner == DlgLinkOwner::StartingList
                 ? "StartingList\\" + std::to_string(ref.position)
@@ -5012,6 +5043,7 @@ private:
                 setOptionalLinkField(document, ref, "ReverseCond", FIELD_TYPE_BYTE,
                                      wxui::toWx(boolText(linkReverseCond_)),
                                      document.hasLinkField(ref, "ReverseCond") || linkReverseCond_->GetValue());
+                offerLinkedNodeChanges(document, ref, static_cast<const GffStruct&>(*before));
                 return;
             }
 
@@ -5039,6 +5071,7 @@ private:
                 setOptionalLinkField(document, ref, "Param" + std::to_string(i + 1) + "b", FIELD_TYPE_INT,
                                      linkParamFields_->GetCellValue(i, 1), false);
             }
+            offerLinkedNodeChanges(document, ref, static_cast<const GffStruct&>(*before));
         });
     }
 
