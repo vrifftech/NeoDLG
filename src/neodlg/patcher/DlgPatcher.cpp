@@ -163,14 +163,12 @@ std::string strRefText(std::uint32_t value) {
     return value == 0xFFFFFFFFu ? std::string("-1") : std::to_string(value);
 }
 
-std::string encodeLocalizedText(const std::string& value) {
+std::string encodeIniText(const std::string& value) {
     std::string result;
     result.reserve(value.size());
-    for (std::size_t index = 0; index < value.size(); ++index) {
-        const char ch = value[index];
+    for (const char ch : value) {
         if (ch == '\r') {
-            if (index + 1u < value.size() && value[index + 1u] == '\n') ++index;
-            result += "<#LF#>";
+            result += "<#CR#>";
         } else if (ch == '\n') {
             result += "<#LF#>";
         } else {
@@ -235,15 +233,6 @@ bool fieldDeepEqual(const GffField& lhs, const GffField& rhs) {
     default:
         return lhs.GetString() == rhs.GetString();
     }
-}
-
-bool hasDuplicateLabels(const GffStruct& structure) {
-    std::set<std::string> labels;
-    for (std::size_t index = 0; index < structure.count(); ++index) {
-        const GffField* field = structure.GetField(index);
-        if (field && !labels.insert(field->GetLabel()).second) return true;
-    }
-    return false;
 }
 
 std::vector<std::uint8_t> serializeGff(GffFile& file) {
@@ -459,7 +448,7 @@ std::string addLocStringSection(EmitContext& context,
         context.project.add(
             sectionName,
             "lang" + std::to_string(sub.stringid),
-            encodeLocalizedText(sub.GetString()));
+            encodeIniText(sub.GetString()));
     }
     context.changed = true;
     return sectionName;
@@ -523,9 +512,10 @@ void emitStruct(EmitContext& context,
         options.listIndexToken,
         std::nullopt);
 
+    std::set<std::string> emittedLabels;
     for (std::size_t index = 0; index < structure.count(); ++index) {
         const GffField* child = structure.GetField(index);
-        if (!child) continue;
+        if (!child || !emittedLabels.insert(child->GetLabel()).second) continue;
 
         if (dynamicTargetToken && child->GetLabel() == "Index" && isScalarPatchable(*child)) {
             const std::string pathToken = allocateToken(context);
@@ -635,7 +625,8 @@ void emitField(EmitContext& context,
                 " with type " + fieldTypeName(field.fieldtype) + ".");
             break;
         default: {
-            const std::string value = forcedValue.value_or(field.GetString());
+            std::string value = forcedValue.value_or(field.GetString());
+            if (field.fieldtype == FIELD_TYPE_CEXOSTRING) value = encodeIniText(value);
             if (containsLineBreak(value)) {
                 context.project.unsupported.push_back(
                     "A non-localized GFF value contains a line break: " +
@@ -670,7 +661,8 @@ void emitDirectScalarModification(EmitContext& context,
             fieldTypeName(modified.fieldtype) + ".");
         return;
     }
-    const std::string value = modified.GetString();
+    std::string value = modified.GetString();
+    if (modified.fieldtype == FIELD_TYPE_CEXOSTRING) value = encodeIniText(value);
     if (containsLineBreak(value)) {
         context.project.unsupported.push_back(
             "A non-localized GFF value contains a line break: " + path);
@@ -712,7 +704,7 @@ void emitDirectLocStringModifications(EmitContext& context,
                 context.project,
                 context.fileSection,
                 path + "(lang" + std::to_string(item.first) + ")",
-                encodeLocalizedText(item.second));
+                encodeIniText(item.second));
             context.changed = true;
         }
     }
@@ -797,19 +789,16 @@ void compareStructs(EmitContext& context,
             (path.empty() ? std::string("root") : path) + ".");
         return;
     }
-    if (hasDuplicateLabels(original) || hasDuplicateLabels(modified)) {
-        if (!structDeepEqual(original, modified)) {
-            context.project.unsupported.push_back(
-                "A structure with duplicate field labels changed at " +
-                (path.empty() ? std::string("root") : path) + ".");
-        }
-        return;
-    }
-
-    std::map<std::string, const GffField*> originalFields;
+    std::map<std::string, std::vector<const GffField*>> originalFields;
+    std::map<std::string, std::vector<const GffField*>> modifiedFields;
     for (std::size_t index = 0; index < original.count(); ++index) {
         if (const GffField* field = original.GetField(index)) {
-            originalFields[field->GetLabel()] = field;
+            originalFields[field->GetLabel()].push_back(field);
+        }
+    }
+    for (std::size_t index = 0; index < modified.count(); ++index) {
+        if (const GffField* field = modified.GetField(index)) {
+            modifiedFields[field->GetLabel()].push_back(field);
         }
     }
 
@@ -818,10 +807,26 @@ void compareStructs(EmitContext& context,
         const GffField* after = modified.GetField(index);
         if (!after) continue;
         const std::string label = after->GetLabel();
-        seen.insert(label);
+        if (!seen.insert(label).second) continue;
         const std::string childPath = appendPath(path, label);
 
         const auto found = originalFields.find(label);
+        const auto& afterFields = modifiedFields.at(label);
+        if (afterFields.size() > 1u ||
+            (found != originalFields.end() && found->second.size() > 1u)) {
+            const bool unchanged = found != originalFields.end() &&
+                found->second.size() == afterFields.size() &&
+                std::equal(found->second.begin(), found->second.end(), afterFields.begin(),
+                    [](const GffField* before, const GffField* after) {
+                        return fieldDeepEqual(*before, *after);
+                    });
+            if (!unchanged) {
+                context.project.unsupported.push_back(
+                    "Duplicated GFF fields changed at " + childPath +
+                    "; TSLPatcher/HoloPatcher cannot address individual occurrences.");
+            }
+            continue;
+        }
         if (found == originalFields.end()) {
             emitField(
                 context,
@@ -832,7 +837,7 @@ void compareStructs(EmitContext& context,
             continue;
         }
 
-        const GffField* before = found->second;
+        const GffField* before = found->second.front();
         if (!before || before->fieldtype != after->fieldtype) {
             context.project.unsupported.push_back(
                 "TSLPatcher cannot change the GFF field type at " + childPath + ".");
@@ -885,7 +890,7 @@ void compareStructs(EmitContext& context,
     for (const auto& originalField : originalFields) {
         if (!seen.count(originalField.first)) {
             if (!dynamicLinkTargetRoot.empty() && originalField.first == "LinkComment" &&
-                originalField.second->fieldtype == FIELD_TYPE_CEXOSTRING) {
+                originalField.second.front()->fieldtype == FIELD_TYPE_CEXOSTRING) {
                 // An absent link comment represents empty editor text.
                 emitDirectScalarModification(
                     context, appendPath(path, originalField.first),
