@@ -206,6 +206,7 @@ if(NEODLG_BUILD_WX_GUI OR NEODLG_BUILD_WX_MODULE)
             SLUG "neodlg"
             ICON "${CMAKE_CURRENT_SOURCE_DIR}/resources/neodlg.svg"
         )
+        neo_enable_updates(NeoDLG "NeoDLG" "${PROJECT_VERSION}")
         target_link_libraries(NeoDLG PRIVATE neodlg_wx)
         target_include_directories(NeoDLG PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/resources)
         target_link_libraries(NeoDLG PRIVATE neoshared::wx)

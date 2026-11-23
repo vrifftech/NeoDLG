@@ -1,3 +1,4 @@
+#include "NeoUpdater.hpp"
 #include "DLGEditorPanel.hpp"
 #include "core/Version.hpp"
 #include "neodlg_icon.xpm"
@@ -39,6 +40,10 @@ class NeoDLGApp final:public wxApp {
 public:bool OnInit()override {
     SetAppName("NeoDLG");SetVendorName("Neo Tools");wxui::initializeTheme("NeoDLG");wxInitAllImageHandlers();
     auto* frame=new NeoDLGFrame;frame->Show();
+#if !defined(__EMSCRIPTEN__)
+        neoupdate::install(*frame, NEO_UPDATE_APPLICATION, NEO_UPDATE_VERSION);
+#endif
+
     if(argc>1){const auto path=neosettings::pathFromWx(wxString(argv[1]));frame->CallAfter([frame,path]{frame->openStartup(path);});}
     return true;
 }};
