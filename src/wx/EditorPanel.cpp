@@ -1237,17 +1237,39 @@ std::string singleLineText(std::string text) {
     return result;
 }
 
+std::vector<DlgIntegerOption> kotorAnimationOptions(DlgFlavor flavor) {
+    if (flavor == DlgFlavor::Kotor2)
+        return {kKotor2AnimationOptions.begin(), kKotor2AnimationOptions.end()};
+    return {kKotorAnimationOptions.begin(), kKotorAnimationOptions.end()};
+}
+
+wxString kotorAnimationText(std::int32_t value, const std::vector<DlgIntegerOption>& options) {
+    for (const auto& option : options)
+        if (option.value == value)
+            return wxui::toWx(option.label) + wxString::Format(" (%d)", value);
+    if (value == 85) return "Knocked Down (85)";
+    if (value == 87) return "Stab (87)";
+    const auto offset = static_cast<std::int64_t>(value) - 1000;
+    if (offset >= 0 && offset <= 727 && offset % 200 < 128) {
+        constexpr const char* suffix[]{"", "W", "L", "WL"};
+        return wxString::Format("CUT%03d%s (%d)", static_cast<int>(offset % 200 + 1),
+                                wxui::toWx(suffix[offset / 200]), value);
+    }
+    return wxString::Format("%d", value);
+}
+
 class AnimationEditDialog final : public wxDialog {
 public:
     AnimationEditDialog(wxWindow* parent,
-                        bool jade,
+                        DlgFlavor flavor,
                         DlgNodeKind nodeKind,
                         const std::vector<std::string>& speakerTags,
                         const DlgAnimation& initial)
         : wxDialog(parent, wxID_ANY, "Dialogue Animation", wxDefaultPosition, wxDefaultSize,
                    wxDEFAULT_DIALOG_STYLE | wxRESIZE_BORDER),
-          jade_(jade),
-          jadeReply_(jade && nodeKind == DlgNodeKind::Reply) {
+          jade_(flavor == DlgFlavor::JadeEmpire),
+          jadeReply_(jade_ && nodeKind == DlgNodeKind::Reply),
+          animationOptions_(kotorAnimationOptions(flavor)) {
         auto* root = new wxBoxSizer(wxVERTICAL);
         auto* form = new wxFlexGridSizer(2, 8, 8);
         form->AddGrowableCol(1, 1);
@@ -1281,8 +1303,28 @@ public:
             participant_->ChangeValue(wxui::toWx(initial.participant));
         }
 
-        animation_ = addTextField(this, form, jadeReply_ ? "Reply animation ID:" : "Animation ID:");
-        animation_->ChangeValue(wxString::Format("%d", initial.animation));
+        if (!jade_) {
+            form->Add(new wxStaticText(this, wxID_ANY, "Animation:"),
+                      0, wxALIGN_CENTER_VERTICAL | wxRIGHT, 8);
+            wxArrayString choices;
+            for (const auto& option : animationOptions_) {
+                if (flavor == DlgFlavor::Kotor2 &&
+                    std::find(kKotor2NonPresetAnimationIds.begin(), kKotor2NonPresetAnimationIds.end(),
+                              option.value) != kKotor2NonPresetAnimationIds.end()) continue;
+                choices.Add(kotorAnimationText(option.value, animationOptions_));
+            }
+            animationChoice_ = new wxComboBox(this, wxID_ANY, wxEmptyString,
+                wxDefaultPosition, wxDefaultSize, choices, wxCB_DROPDOWN | wxCB_SORT);
+            animationChoice_->SetValue(wxString::Format("%d", initial.animation));
+            animationChoice_->SetStringSelection(kotorAnimationText(initial.animation, animationOptions_));
+            animationChoice_->AutoComplete(choices);
+            animationChoice_->SetToolTip(
+                "Choose an animation by name or enter a numeric animation ID. CUT motions depend on the participant's model.");
+            form->Add(animationChoice_, 1, wxEXPAND);
+        } else {
+            animation_ = addTextField(this, form, jadeReply_ ? "Reply animation ID:" : "Animation ID:");
+            animation_->ChangeValue(wxString::Format("%d", initial.animation));
+        }
 
         if (jade_) {
             emotion_ = addTextField(this, form, "Emotion ID:");
@@ -1316,7 +1358,14 @@ public:
         } else if (!jade_ && participant_) {
             result.participant = wxui::toStd(participant_->GetValue());
         }
-        result.animation = neogff::ParseInt32Decimal(wxui::toStd(animation_->GetValue()));
+        wxString animationText = animationChoice_ ? animationChoice_->GetValue() : animation_->GetValue();
+        if (animationChoice_)
+            for (const auto& option : animationOptions_)
+                if (animationText.CmpNoCase(kotorAnimationText(option.value, animationOptions_)) == 0) {
+                    animationText = wxString::Format("%d", option.value);
+                    break;
+                }
+        result.animation = neogff::ParseInt32Decimal(wxui::toStd(animationText));
         result.emotion = emotion_ ? neogff::ParseInt32Decimal(wxui::toStd(emotion_->GetValue())) : 0;
         return result;
     }
@@ -1334,7 +1383,9 @@ private:
     wxChoice* participantChoice_ = nullptr;
     std::vector<std::int32_t> participantValues_;
     wxTextCtrl* animation_ = nullptr;
+    wxComboBox* animationChoice_ = nullptr;
     wxTextCtrl* emotion_ = nullptr;
+    std::vector<DlgIntegerOption> animationOptions_;
 };
 
 constexpr int kMoveParticipantUpId = wxID_HIGHEST + 12980;
@@ -3762,7 +3813,7 @@ private:
                                         wxLC_REPORT | wxLC_SINGLE_SEL);
         animationList_->SetName("NeoDLG animation list");
         animationList_->InsertColumn(0, "Participant");
-        animationList_->InsertColumn(1, "Animation ID");
+        animationList_->InsertColumn(1, "Animation");
         animationList_->InsertColumn(2, "Emotion ID");
         animationList_->SetColumnWidth(0, FromDIP(220));
         animationList_->SetColumnWidth(1, FromDIP(130));
@@ -5120,7 +5171,7 @@ private:
         if (document.dialect() == DlgDialect::JadeEmpire && ref.kind == DlgNodeKind::Entry) {
             initial.participantIndex = -1;
         }
-        AnimationEditDialog dialog(this, document.dialect() == DlgDialect::JadeEmpire, ref.kind,
+        AnimationEditDialog dialog(this, effectiveDialogueFlavor(document), ref.kind,
                                    document.speakerTags(), initial);
         wxui::applyTheme(&dialog, darkMode_);
         if (dialog.ShowModal() != wxID_OK) return;
@@ -5137,7 +5188,7 @@ private:
         if (row < 0 || static_cast<std::size_t>(row) >= animationValues_.size()) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
         const DlgDocument document = dialogue();
-        AnimationEditDialog dialog(this, document.dialect() == DlgDialect::JadeEmpire, ref.kind,
+        AnimationEditDialog dialog(this, effectiveDialogueFlavor(document), ref.kind,
                                    document.speakerTags(),
                                    animationValues_[static_cast<std::size_t>(row)]);
         wxui::applyTheme(&dialog, darkMode_);
@@ -6180,11 +6231,13 @@ private:
         const DlgNodeRef ref = *activeDocument().selectedNode;
         animationValues_ = document.animations(ref);
         const bool jade = document.dialect() == DlgDialect::JadeEmpire;
+        const auto flavor = effectiveDialogueFlavor(document);
+        const auto options = kotorAnimationOptions(flavor);
         const bool jadeReply = jade && ref.kind == DlgNodeKind::Reply;
         const std::vector<std::string> tags = jade ? document.speakerTags() : std::vector<std::string>{};
 
         animationList_->SetColumnWidth(0, jadeReply ? 0 : FromDIP(220));
-        animationList_->SetColumnWidth(1, FromDIP(150));
+        animationList_->SetColumnWidth(1, FromDIP(jade ? 150 : flavor == DlgFlavor::Kotor2 ? 400 : 280));
         animationList_->SetColumnWidth(2, jade ? FromDIP(130) : 0);
         // A document/dialect refresh resets the legacy widths just as before.
         // Keep them separately while the same list is using compact columns.
@@ -6199,7 +6252,8 @@ private:
                 ? (jadeReply ? std::string{} : jadeParticipantText(animation.participantIndex, tags, true))
                 : animation.participant;
             const long row = animationList_->InsertItem(static_cast<long>(i), wxui::toWx(participant));
-            animationList_->SetItem(row, 1, wxString::Format("%d", animation.animation));
+            animationList_->SetItem(row, 1, jade ? wxString::Format("%d", animation.animation)
+                : kotorAnimationText(animation.animation, options));
             animationList_->SetItem(row, 2, wxString::Format("%d", animation.emotion));
         }
 
@@ -6264,7 +6318,7 @@ private:
             animationList_->SetMinSize(FromDIP(wxSize(-1, 220)));
             animationList_->SetMaxSize(wxDefaultSize);
             animationList_->SetToolTip(wxString{});
-            heading(1, "Animation ID");
+            heading(1, "Animation");
             heading(2, "Emotion ID");
             for (int column = 0; column < 3; ++column)
                 animationList_->SetColumnWidth(column, animationConversationWidths_[column]);
@@ -6295,7 +6349,7 @@ private:
         refreshCompactAnimationActions();
         if (count == 0) return; // No empty white list, header or reserved rows.
 
-        heading(1, "Anim ID");
+        heading(1, "Animation");
         heading(2, "Emotion");
         animationList_->SetToolTip("Double-click a row or press Enter to edit. "
                                    "Scroll the list for more animations.");
