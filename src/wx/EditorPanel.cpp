@@ -36,6 +36,7 @@
 #include <wx/notebook.h>
 #include <wx/scrolwin.h>
 #include <wx/sizer.h>
+#include <wx/scopeguard.h>
 #include <wx/splitter.h>
 #include <wx/statbox.h>
 #include <wx/treectrl.h>
@@ -821,9 +822,9 @@ private:
 class LocalizedTextEditor final : public wxPanel {
 public:
     LocalizedTextEditor(wxWindow* parent, std::function<void()> relayout,
-                        std::function<void(wxWindow*)> styleRow)
+                        std::function<void(wxWindow*)> styleRow, std::function<void()> changed)
         : wxPanel(parent, wxID_ANY), relayout_(std::move(relayout)),
-          styleRow_(std::move(styleRow)) {
+          styleRow_(std::move(styleRow)), changed_(std::move(changed)) {
         single_ = new ResizableInspectorText(this, "NeoDLG local text", 0, relayout_, 110);
         multiple_ = new wxPanel(this);
         rowsSizer_ = new wxBoxSizer(wxVERTICAL);
@@ -845,6 +846,7 @@ public:
             refreshChoices();
             relayout_();
             rows_.back().editor->Text()->SetFocus();
+            changed_();
         });
     }
 
@@ -996,6 +998,7 @@ private:
             const auto row = std::find_if(rows_.begin(), rows_.end(),
                 [panel](const auto& item) { return item.panel == panel; });
             rows_.erase(row);
+            changed_();
             rowsSizer_->Detach(panel);
             panel->Destroy();
             refreshChoices();
@@ -1006,6 +1009,7 @@ private:
 
     std::function<void()> relayout_;
     std::function<void(wxWindow*)> styleRow_;
+    std::function<void()> changed_;
     ResizableInspectorText* single_;
     wxPanel* multiple_;
     wxBoxSizer* rowsSizer_;
@@ -1951,7 +1955,7 @@ public:
     bool activateResource(const std::string& identity) override {
         if (identity.empty()) return false;
         for (std::size_t i=0; i<documents_.size(); ++i)
-            if (documents_[i].resourceIdentity == identity) { selectDocumentTab(i); return true; }
+            if (documents_[i].resourceIdentity == identity) { return selectDocumentTab(i); }
         return false;
     }
     std::size_t documentCount() const override { return documents_.size(); }
@@ -1974,6 +1978,7 @@ public:
         return result;
     }
     bool openResource(neoshared::ResourceDocument input) override {
+        if (!applyPendingInspector()) return false;
         if (activateResource(input.identity)) return true;
         auto candidate = std::make_unique<GffModel>();
         neoshared::loadGffResource(input, *candidate, "DLG ");
@@ -2055,6 +2060,7 @@ private:
         std::optional<neogames::GameId> resolvedGame;
         wxWindow* tabPage = nullptr;
         bool saveInProgress = false;
+        unsigned pendingInspector = 0;
 #if defined(__EMSCRIPTEN__)
         neobrowser::BrowserImportLease sourceImport;
         neobrowser::BrowserImportLease tlkImport;
@@ -2117,7 +2123,7 @@ private:
     }
 
     bool tabDirty(const DocumentTab& tab) const {
-        return tab.saveInProgress ||
+        return tab.saveInProgress || tab.pendingInspector != 0 ||
                (tab.model && dlgDiffersFromCheckpoint(*tab.model, tab.savedContents));
     }
 
@@ -2393,13 +2399,24 @@ private:
         Bind(wxEVT_MENU, [this](wxCommandEvent&) { moveAnimation(1); }, ID_AnimationDown);
         Bind(wxEVT_TREE_ITEM_ACTIVATED, &NeoDLGPanelImpl::onRawTreeActivated, this, ID_RawTree);
         Bind(wxEVT_TREE_ITEM_EXPANDING, &NeoDLGPanelImpl::onRawTreeExpanding, this, ID_RawTree);
+        Bind(wxEVT_TREE_SEL_CHANGING, [this](wxTreeEvent& event) {
+            if (!treeRefreshInProgress_ && !applyPendingInspector()) event.Veto();
+            else event.Skip();
+        }, ID_ConversationTree);
         Bind(wxEVT_TREE_SEL_CHANGED, &NeoDLGPanelImpl::onTreeSelection, this, ID_ConversationTree);
         Bind(wxEVT_TREE_ITEM_ACTIVATED, &NeoDLGPanelImpl::onTreeActivated, this, ID_ConversationTree);
         Bind(wxEVT_TREE_ITEM_MENU, &NeoDLGPanelImpl::onTreeContextMenu, this, ID_ConversationTree);
+        documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGING, [this](wxAuiNotebookEvent& event) {
+            if (!tabSwitchInProgress_ && !applyPendingInspector()) event.Veto();
+            else event.Skip();
+        });
         documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onDocumentTabChanged, this);
         documentTabs_->Bind(wxEVT_AUINOTEBOOK_PAGE_CLOSE, &NeoDLGPanelImpl::onDocumentTabCloseRequested, this);
         workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGING, [this](wxBookCtrlEvent& event) {
-            if (event.GetEventObject() == workspaceBook_) captureRenderedTreeStates();
+            if (event.GetEventObject() == workspaceBook_) {
+                if (!applyPendingInspector()) { event.Veto();return; }
+                captureRenderedTreeStates();
+            }
             event.Skip();
         }, ID_Workspace);
         workspaceBook_->Bind(wxEVT_NOTEBOOK_PAGE_CHANGED, &NeoDLGPanelImpl::onWorkspacePageChanged,
@@ -2495,6 +2512,7 @@ private:
         buildPresentationPage(inspectorBook_);
         buildLinkPage(inspectorBook_);
         buildAnimationsPage(inspectorBook_);
+        for (unsigned i = 0; i < 4; ++i) bindInspectorEdits(inspectorSections_[i].content, 1u << i);
         initializeInspectorLayouts();
         rebuildInspectorForms(false);
         splitter->SplitVertically(conversationTree_, inspectorHost_, FromDIP(520));
@@ -2986,7 +3004,8 @@ private:
             compactInspectorBands_.push_back({lines, fields, {}, {}, item});
         };
         const auto apply = [&](wxSizer* root, wxWindow* page, int id) {
-            root->Add(page->FindWindow(id), 0, wxALIGN_RIGHT | wxALL, pad);
+            if (id == ID_CommitTlk) root->Add(page->FindWindow(id), 0, wxALIGN_RIGHT | wxALL, pad);
+            else root->Insert(0, page->FindWindow(id), 0, wxALIGN_RIGHT | wxALL, pad);
         };
         const auto parameters = [&](wxSizer* root, wxWindow* title, IntegerParameterFields* fields) {
             if (!singlePanel && !fields->IsShown()) return;
@@ -3375,7 +3394,8 @@ private:
                 wxui::applyTheme(row, darkMode_);
                 neoview::applyFontScale(row, fontScale_);
                 bindInspectorWheelForwarding(row);
-            });
+                bindInspectorEdits(row, 1);
+            }, [this]() { markInspectorEdited(1); });
         nodeLocalText_->SetMultiLanguage(multiLanguage_);
         form->Add(nodeLocalText_, 0, wxEXPAND);
         nodeResolvedText_ = addResizableInspectorText(page, form, "Resolved TLK text:",
@@ -4006,8 +4026,9 @@ private:
     }
 #endif
 
-    void selectDocumentTab(std::size_t index) {
-        if (index >= documents_.size()) return;
+    bool selectDocumentTab(std::size_t index) {
+        if (index >= documents_.size()) return false;
+        if (index != activeDocumentIndex_ && !applyPendingInspector()) return false;
         if (hasActiveDocument() && index != activeDocumentIndex_) captureRenderedTreeStates();
         cancelConversationViewportRestore();
         tabSwitchInProgress_ = true;
@@ -4018,6 +4039,7 @@ private:
         setSemanticFindText(wxui::toWx(activeDocument().findTerm));
         setWorkspaceView(activeDocument().workspaceView, false);
         refreshAll();
+        return true;
     }
 
     bool confirmCloseDocument(std::size_t index) {
@@ -4069,6 +4091,7 @@ private:
     }
 
     void newDocument(DlgFlavor flavor) {
+        if (!applyPendingInspector()) return;
         try {
             if (!activeTabReusable()) createDocumentTab(true);
             DlgDocument document(model());
@@ -4120,10 +4143,11 @@ private:
     }
 
     bool openModelPath(const std::filesystem::path& path) {
+        if (!applyPendingInspector()) return false;
         if (path.empty()) return false;
         for (std::size_t i=0; i<documents_.size(); ++i) {
             if (neoshared::sameResourcePath(path, documentFilename(documents_[i]))) {
-                selectDocumentTab(i); return true;
+                return selectDocumentTab(i);
             }
         }
 
@@ -4235,6 +4259,7 @@ private:
     }
 
     bool save(bool saveAs, const std::filesystem::path& forcedTarget = {}) {
+        if (!applyPendingInspector()) return false;
         if (!hasActiveDocument() || !model().loaded()) return false;
         if (activeDocument().saveInProgress || browserSaveActive_) return false;
         try {
@@ -4448,8 +4473,46 @@ private:
         rebuildRecentFilesMenu();
     }
 
+    void markInspectorEdited(unsigned section) {
+        if (inspectorRefreshInProgress_ || !hasActiveDocument() || !model().loaded()) return;
+        auto& pending = activeDocument().pendingInspector;
+        if (pending & section) return;
+        pending |= section;
+        refreshHeader();updateTabTitle();
+    }
+
+    void bindInspectorEdits(wxWindow* window, unsigned section) {
+        if (window == nodeResolvedText_) return; // TLK text has its own Commit action.
+        const auto edited = [this, section](wxCommandEvent& event) { markInspectorEdited(section);event.Skip(); };
+        if (dynamic_cast<wxTextCtrl*>(window) || dynamic_cast<wxComboBox*>(window)) window->Bind(wxEVT_TEXT, edited);
+        if (dynamic_cast<wxComboBox*>(window)) window->Bind(wxEVT_COMBOBOX, edited);
+        if (dynamic_cast<wxChoice*>(window)) window->Bind(wxEVT_CHOICE, edited);
+        if (dynamic_cast<wxCheckBox*>(window)) window->Bind(wxEVT_CHECKBOX, edited);
+        if (dynamic_cast<wxColourPickerCtrl*>(window)) window->Bind(wxEVT_COLOURPICKER_CHANGED, edited);
+        for (auto* child : window->GetChildren()) bindInspectorEdits(child, section);
+    }
+
+    bool applyPendingInspector() {
+        if (!hasActiveDocument() || !activeDocument().pendingInspector) return true;
+        const bool applied = mutate("Edit dialogue properties", [this]() {
+            inspectorTransaction_ = true;
+            wxON_BLOCK_EXIT_SET(inspectorTransaction_, false);
+            const auto pending = activeDocument().pendingInspector;
+            wxCommandEvent event;
+            if (pending & 1) onApplyNode(event);
+            if (pending & 2) onApplyScripts(event);
+            if (pending & 4) onApplyPresentation(event);
+            if (pending & 8) onApplyLink(event);
+            activeDocument().pendingInspector = 0;
+        }, false);
+        if (applied) { synchronizeDocumentDirty(activeDocument());refreshHeader();updateTabTitle();refreshUndoMenu(); }
+        return applied;
+    }
+
     template <typename Function>
-    bool mutate(const std::string& description, Function&& function) {
+    bool mutate(const std::string& description, Function&& function, bool refresh = true) {
+        if (inspectorTransaction_) { function();return true; }
+        if (refresh && !applyPendingInspector()) return false;
         if (!hasActiveDocument() || !model().loaded()) return false;
         captureRenderedTreeStates();
         const auto selectedNode = activeDocument().selectedNode;
@@ -4477,16 +4540,17 @@ private:
                 if (activeDocument().undo.size() > kUndoLimit) activeDocument().undo.erase(activeDocument().undo.begin());
                 activeDocument().redo.clear();
             }
-            refreshAll();
+            if (refresh) refreshAll();
             return true;
         } catch (const std::exception& ex) {
-            refreshAll();
+            if (refresh) refreshAll();
             wxui::showError(this, ex);
             return false;
         }
     }
 
     void onUndo(wxCommandEvent&) {
+        if (!applyPendingInspector()) return;
         if (!hasActiveDocument() || activeDocument().undo.empty()) return;
         try {
             UndoSnapshot snapshot = std::move(activeDocument().undo.back());
@@ -4498,6 +4562,7 @@ private:
     }
 
     void onRedo(wxCommandEvent&) {
+        if (!applyPendingInspector()) return;
         if (!hasActiveDocument() || activeDocument().redo.empty()) return;
         try {
             UndoSnapshot snapshot = std::move(activeDocument().redo.back());
@@ -4739,6 +4804,7 @@ private:
     }
 
     void onValidate(wxCommandEvent&) {
+        if (!applyPendingInspector()) return;
         if (!model().loaded()) return;
         ValidationDialog dialog(this, dialogue(), dialogue().validate());
         wxui::applyTheme(&dialog, darkMode_);
@@ -4822,6 +4888,11 @@ private:
     }
 
     void onApplyNode(wxCommandEvent&) {
+        if (!inspectorTransaction_) {
+            markInspectorEdited(1);
+            if (applyPendingInspector()) refreshAll();
+            return;
+        }
         if (!activeDocument().selectedNode) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
         mutate("Edit dialogue line", [this, ref]() {
@@ -4882,6 +4953,11 @@ private:
     }
 
     void onApplyScripts(wxCommandEvent&) {
+        if (!inspectorTransaction_) {
+            markInspectorEdited(2);
+            if (applyPendingInspector()) refreshAll();
+            return;
+        }
         refreshContextualInspector();
         if (!activeDocument().selectedNode) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
@@ -4939,6 +5015,11 @@ private:
     }
 
     void onApplyPresentation(wxCommandEvent&) {
+        if (!inspectorTransaction_) {
+            markInspectorEdited(4);
+            if (applyPendingInspector()) refreshAll();
+            return;
+        }
         refreshContextualInspector();
         if (!activeDocument().selectedNode) return;
         const DlgNodeRef ref = *activeDocument().selectedNode;
@@ -5070,6 +5151,11 @@ private:
     }
 
     void onApplyLink(wxCommandEvent&) {
+        if (!inspectorTransaction_) {
+            markInspectorEdited(8);
+            if (applyPendingInspector()) refreshAll();
+            return;
+        }
         refreshContextualInspector();
         if (!activeDocument().selectedLink) return;
         const DlgLinkRef ref = *activeDocument().selectedLink;
@@ -5275,6 +5361,7 @@ private:
     }
 
     void onExport(bool json) {
+        if (!applyPendingInspector()) return;
         if (!model().loaded() || model().gff().isGff4()) {
             wxui::showMessage(this, "Export", "Semantic XML/JSON export is available for classic GFF V3 DLG files.");
             return;
@@ -5419,6 +5506,7 @@ private:
     }
 
     void onExportPatcherPackage(wxCommandEvent&) {
+        if (!applyPendingInspector()) return;
         if (!model().loaded() || model().gff().isGff4()) return;
         try {
             neodlggui::PatcherExportModeDialog modeDialog(this, darkMode_);
@@ -5459,6 +5547,7 @@ private:
     }
 
     void setWorkspaceView(WorkspaceView view, bool refresh = true) {
+        if (refresh && !applyPendingInspector()) return;
         if (!workspaceBook_ || workspaceBook_->GetPageCount() < 3) return;
         if (refresh) captureRenderedTreeStates();
         cancelConversationViewportRestore();
@@ -5527,7 +5616,7 @@ private:
 
         if (activeDocument().workspaceView == WorkspaceView::Raw) refreshRawTree();
         else refreshConversationTree();
-        refreshInspector();
+        if (!activeDocument().pendingInspector) refreshInspector();
         synchronizeDocumentDirty(activeDocument());
         refreshHeader();
         updateTabTitle();
@@ -5840,6 +5929,7 @@ private:
     }
 
     void onTreeContextMenu(wxTreeEvent& event) {
+        if (!applyPendingInspector()) return;
         const wxTreeItemId item = event.GetItem();
         if (item.IsOk()) {
             conversationTree_->SelectItem(item);
@@ -5882,6 +5972,7 @@ private:
     void selectSemanticNode(DlgNodeRef node,
                             std::optional<DlgLinkRef> link,
                             bool updateInspector = true) {
+        if (!applyPendingInspector()) return;
         cancelConversationViewportRestore();
         wxTreeItemId item;
         if (link) {
@@ -5934,6 +6025,8 @@ private:
     }
 
     void refreshInspector() {
+        inspectorRefreshInProgress_ = true;
+        wxON_BLOCK_EXIT_SET(inspectorRefreshInProgress_, false);
         const bool valid = hasActiveDocument() && model().loaded() &&
                            dialogue().semanticallyEditable() && activeDocument().selectedNode;
         enableInspector(valid);
@@ -6935,6 +7028,8 @@ private:
 
     wxAuiNotebook* documentTabs_ = nullptr;
     wxNotebook* workspaceBook_ = nullptr;
+    bool inspectorRefreshInProgress_ = false;
+    bool inspectorTransaction_ = false;
     wxPanel* conversationWorkspacePage_ = nullptr;
     wxPanel* singlePanelWorkspacePage_ = nullptr;
     wxPanel* semanticWorkspace_ = nullptr;
