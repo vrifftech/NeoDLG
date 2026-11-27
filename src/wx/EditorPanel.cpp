@@ -4321,6 +4321,7 @@ private:
                     }
 
                     savedDocument.logicalFilename = target;
+                    savedDocument.resourceIdentity.clear();
                     savedDocument.savedContents = std::move(savedContents);
                     savedDocument.model->gff().dirty(false);
                     frame->synchronizeDocumentDirty(savedDocument);
@@ -4343,6 +4344,7 @@ private:
             return true;
 #else
             document.logicalFilename = target;
+            document.resourceIdentity.clear();
             document.savedContents = std::move(savedContents);
             document.model->gff().dirty(false);
             synchronizeDocumentDirty(document);
